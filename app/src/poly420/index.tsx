@@ -48,8 +48,6 @@ function isIOSChromeLikeWebView() {
   return isIOS && isChromeiOS;
 }
 
-// iOS Chrome (WKWebView) can report AudioContext "running" yet output nothing;
-// we "prime" the HTMLMediaElement path inside a trusted gesture, then run WebAudio for precision.
 function makeWavDataUri({
   freq,
   durationSec,
@@ -289,9 +287,15 @@ export default function Poly420() {
   const audioContextRef = useRef<AudioContext | null>(null);
   const keepAliveRef = useRef<OscillatorNode | null>(null);
 
-  // WebAudio timing
+  // Timing
   const startTimeRef = useRef(0);
   const nextCycleRef = useRef(0);
+  const scheduledUntilRef = useRef(0);
+
+  // Live refs to avoid tearing down audio on every UI change
+  const cycleDurationRef = useRef(60 / (initial?.tempo ?? DEFAULT_TEMPO));
+  const audibleTracksRef = useRef<Track[]>([]);
+  const restartTransportRef = useRef(false);
 
   const lastCssProgressRef = useRef(-1);
   const snapResetHandleRef = useRef<number | null>(null);
@@ -306,6 +310,21 @@ export default function Poly420() {
       if (snapResetHandleRef.current !== null) {
         cancelAnimationFrame(snapResetHandleRef.current);
       }
+      // On unmount only: close audio
+      void (async () => {
+        try {
+          keepAliveRef.current?.stop();
+        } catch {}
+        keepAliveRef.current = null;
+
+        const ctx = audioContextRef.current;
+        audioContextRef.current = null;
+        if (ctx && ctx.state !== "closed") {
+          try {
+            await ctx.close();
+          } catch {}
+        }
+      })();
     };
   }, []);
 
@@ -326,6 +345,13 @@ export default function Poly420() {
     const base = focused.length > 0 ? focused : tracks;
     return base.filter((track) => !track.muted);
   }, [tracks]);
+
+  // Keep refs current, and request a transport restart (no context close) when changes affect timing
+  useEffect(() => {
+    cycleDurationRef.current = cycleDuration;
+    audibleTracksRef.current = audibleTracks;
+    if (playingRef.current) restartTransportRef.current = true;
+  }, [cycleDuration, audibleTracks]);
 
   const setCycleProgressCss = useCallback((value: number) => {
     const clamped = Math.max(0, Math.min(1, value));
@@ -351,27 +377,29 @@ export default function Poly420() {
     lastCssProgressRef.current = clamped;
   }, []);
 
-  const ensureAudioRunning = useCallback(async () => {
-    let ctx = audioContextRef.current;
+  const ensureAudioRunningInGesture = useCallback(async () => {
     const AudioCtor: typeof AudioContext =
       window.AudioContext ||
       (window as unknown as { webkitAudioContext: typeof AudioContext })
         .webkitAudioContext;
 
+    let ctx = audioContextRef.current;
+
+    // Create inside gesture when possible; iOS is picky about creation + resume ordering
     if (!ctx || ctx.state === "closed") {
-      // latencyHint reduces buffering, helps responsiveness/precision feel
       ctx = new AudioCtor({
         latencyHint: "interactive",
       } as AudioContextOptions);
       audioContextRef.current = ctx;
     }
 
+    // IMPORTANT: don't swallow resume failures; if this throws, caller should keep playing=false
     if (ctx.state !== "running") {
-      await ctx.resume().catch(() => {});
+      await ctx.resume();
     }
 
-    // Keep the audio graph alive (some iOS/WKWebView cases behave better)
-    if (!keepAliveRef.current && ctx.state === "running") {
+    // Keep the audio graph alive (helps iOS/WKWebView stability)
+    if (!keepAliveRef.current) {
       const osc = ctx.createOscillator();
       const gain = ctx.createGain();
       gain.gain.value = 0; // silent
@@ -385,31 +413,42 @@ export default function Poly420() {
     return ctx;
   }, []);
 
-  const resetAudioContext = useCallback(() => {
-    const existingContext = audioContextRef.current;
+  const stopAudioHard = useCallback(() => {
+    setPlaying(false);
+
+    const ctx = audioContextRef.current;
 
     try {
       keepAliveRef.current?.stop();
     } catch {}
     keepAliveRef.current = null;
 
-    if (existingContext && existingContext.state !== "closed") {
-      existingContext.close().catch(() => {});
-    }
-    audioContextRef.current = null;
+    // Reset transport state immediately
     startTimeRef.current = 0;
     nextCycleRef.current = 0;
+    scheduledUntilRef.current = 0;
+    restartTransportRef.current = false;
+
+    // Closing is fine on explicit Stop; the next Play must be a gesture anyway
+    if (ctx && ctx.state !== "closed") {
+      ctx.close().catch(() => {});
+    }
+    audioContextRef.current = null;
   }, []);
 
   const ensureAudioPool = useCallback(() => {
     if (audioPoolRef.current.length > 0) return;
 
-    const POOL = 8; // only needed for priming; keep it small
+    const POOL = 6; // only needed for priming
     const pool: PoolAudio[] = [];
     for (let i = 0; i < POOL; i++) {
       const a = new Audio();
       a.preload = "auto";
+      // TS doesn't know these; set as attributes for iOS
+      a.setAttribute("playsinline", "");
+      a.setAttribute("webkit-playsinline", "");
       (a as any).playsInline = true;
+      (a as any).webkitPlaysInline = true;
       pool.push(a);
     }
     audioPoolRef.current = pool;
@@ -422,7 +461,7 @@ export default function Poly420() {
 
     const uri = makeWavDataUri({
       freq,
-      durationSec: accent ? 0.06 : 0.045, // short + snappy (only for priming)
+      durationSec: accent ? 0.06 : 0.045,
       sampleRate: 44100,
       volume: accent ? 0.95 : 0.7,
       type: accent ? "square" : "sine",
@@ -432,29 +471,35 @@ export default function Poly420() {
     return uri;
   }, []);
 
-  const primeMediaOnce = useCallback(async () => {
+  const primeMediaOnceInGesture = useCallback(async () => {
     if (didPrimeMediaRef.current) return;
     ensureAudioPool();
 
-    const pool = audioPoolRef.current;
-    const a = pool[0];
+    const a = audioPoolRef.current[0];
     a.src = getSampleUri(440, false);
-    a.volume = 0;
+
+    // iOS is increasingly hostile to "volume=0 unlock". Use muted + tiny volume.
+    a.muted = true;
+    a.volume = 1;
 
     try {
-      a.currentTime = 0;
-    } catch {}
-    try {
-      await a.play();
+      try {
+        a.currentTime = 0;
+      } catch {}
+      const p = a.play();
+      // Some WKWebView builds return undefined; normalize
+      if (p && typeof (p as Promise<void>).then === "function") {
+        await p;
+      }
       a.pause();
       try {
         a.currentTime = 0;
       } catch {}
       didPrimeMediaRef.current = true;
     } catch {
-      // If even this fails, you're not in a trusted gesture.
+      // If this fails, it wasn't a trusted gesture (or policy changed). We'll still try WebAudio.
     } finally {
-      a.volume = 1;
+      a.muted = false;
     }
   }, [ensureAudioPool, getSampleUri]);
 
@@ -468,92 +513,113 @@ export default function Poly420() {
     document.body.classList.toggle("poly420-dark", darkMode);
   }, [darkMode]);
 
+  // Scheduler: does NOT create/resume/close AudioContext. It only schedules if ctx is running.
   useEffect(() => {
+    if (!playing) return;
+
     let interval: number | null = null;
     let cancelled = false;
 
-    const setup = async () => {
-      if (!playing) return;
+    const scheduleAhead = 0.8; // more buffer reduces choppiness on mobile
+    const tickMs = 25;
 
-      // WebAudio scheduler (precision)
-      const ctx =
-        audioContextRef.current && audioContextRef.current.state !== "closed"
-          ? audioContextRef.current
-          : await ensureAudioRunning();
-
+    const schedule = () => {
       if (cancelled) return;
 
-      const startAt = ctx.currentTime + 0.05;
-      startTimeRef.current = startAt;
-      nextCycleRef.current = 0;
+      const ctx = audioContextRef.current;
+      if (!ctx || ctx.state !== "running") {
+        // iOS may have suspended us; require a user tap to recover (don't spam resume here)
+        return;
+      }
 
-      const scheduleAhead = 0.7;
+      if (restartTransportRef.current || startTimeRef.current === 0) {
+        // Restart transport cleanly without closing context
+        const startAt = ctx.currentTime + 0.06;
+        startTimeRef.current = startAt;
+        nextCycleRef.current = 0;
+        scheduledUntilRef.current = startAt;
+        restartTransportRef.current = false;
+      }
 
-      const schedule = () => {
-        const until = ctx.currentTime + scheduleAhead;
-        while (
-          startTimeRef.current + nextCycleRef.current * cycleDuration <
-          until
-        ) {
-          const cycleStart =
-            startTimeRef.current + nextCycleRef.current * cycleDuration;
-          audibleTracks.forEach((track) => {
-            const frequency = PITCHES[track.pitchIndex % PITCHES.length];
-            for (let beat = 0; beat < track.beatsPerCycle; beat += 1) {
-              const beatMoment =
-                cycleStart + (cycleDuration * beat) / track.beatsPerCycle;
-              scheduleClickWebAudio(
-                ctx,
-                beatMoment,
-                frequency,
-                beat === 0,
-                track.beatsPerCycle,
-                track.volume
-              );
-            }
-          });
-          nextCycleRef.current += 1;
+      const cycleDur = cycleDurationRef.current;
+      const tracksNow = audibleTracksRef.current;
+
+      const until = ctx.currentTime + scheduleAhead;
+
+      // Schedule cycles until "until"
+      while (scheduledUntilRef.current < until) {
+        const cycleIndex = nextCycleRef.current;
+        const cycleStart = startTimeRef.current + cycleIndex * cycleDur;
+
+        // If our cycleStart is already too far in the past (tab pause), realign
+        if (cycleStart < ctx.currentTime - 0.2) {
+          restartTransportRef.current = true;
+          return;
         }
-      };
 
-      interval = window.setInterval(schedule, 25);
+        tracksNow.forEach((track) => {
+          const frequency = PITCHES[track.pitchIndex % PITCHES.length];
+          for (let beat = 0; beat < track.beatsPerCycle; beat += 1) {
+            const beatMoment =
+              cycleStart + (cycleDur * beat) / track.beatsPerCycle;
+            scheduleClickWebAudio(
+              ctx,
+              beatMoment,
+              frequency,
+              beat === 0,
+              track.beatsPerCycle,
+              track.volume
+            );
+          }
+        });
+
+        nextCycleRef.current += 1;
+        scheduledUntilRef.current = cycleStart + cycleDur;
+      }
     };
 
-    void setup();
+    // Initial schedule immediately
+    schedule();
+    interval = window.setInterval(schedule, tickMs);
+
+    const onVisibility = () => {
+      // If we come back from background, timing jumps; restart on next scheduler tick.
+      restartTransportRef.current = true;
+    };
+
+    window.addEventListener("visibilitychange", onVisibility);
+    window.addEventListener("pageshow", onVisibility);
 
     return () => {
       cancelled = true;
       if (interval !== null) window.clearInterval(interval);
-      resetAudioContext();
+      window.removeEventListener("visibilitychange", onVisibility);
+      window.removeEventListener("pageshow", onVisibility);
+      // DO NOT close context here. Only Stop/unmount closes.
     };
-  }, [
-    playing,
-    cycleDuration,
-    audibleTracks,
-    ensureAudioRunning,
-    resetAudioContext,
-  ]);
+  }, [playing]);
 
+  // CSS progress loop (read-only; doesn't touch audio engine)
   useEffect(() => {
     let frame: number | null = null;
 
     const update = () => {
-      if (!playing) {
+      if (!playingRef.current) {
         setCycleProgressCss(0);
         frame = null;
         return;
       }
 
       const ctx = audioContextRef.current;
-      if (!ctx) {
+      if (!ctx || ctx.state !== "running" || startTimeRef.current === 0) {
         setCycleProgressCss(0);
         frame = requestAnimationFrame(update);
         return;
       }
 
+      const cycleDur = cycleDurationRef.current;
       const elapsed = Math.max(0, ctx.currentTime - startTimeRef.current);
-      const position =
-        cycleDuration > 0 ? (elapsed % cycleDuration) / cycleDuration : 0;
+      const position = cycleDur > 0 ? (elapsed % cycleDur) / cycleDur : 0;
       setCycleProgressCss(position);
       frame = requestAnimationFrame(update);
     };
@@ -567,29 +633,36 @@ export default function Poly420() {
     return () => {
       if (frame !== null) cancelAnimationFrame(frame);
     };
-  }, [playing, cycleDuration, setCycleProgressCss]);
+  }, [playing, setCycleProgressCss]);
 
   const togglePlay = async () => {
-    if (playing) {
-      setPlaying(false);
-      resetAudioContext();
+    if (playingRef.current) {
+      stopAudioHard();
       return;
     }
 
-    // Prime iOS Chrome-like WebViews inside the gesture, but still run WebAudio for precision.
+    // Unlock iOS Chrome-like media stack inside the gesture (best-effort)
     if (isIOSChromeLikeWebView()) {
-      await primeMediaOnce();
+      await primeMediaOnceInGesture();
     }
 
-    const existingContext = audioContextRef.current;
-    const beforeState = existingContext?.state ?? "none";
-    const ctx = await ensureAudioRunning();
-    const afterState = ctx.state;
-    console.log(
-      `[poly420] Play tap resume state: ${beforeState} -> ${afterState}`
-    );
+    try {
+      const existing = audioContextRef.current;
+      const beforeState = existing?.state ?? "none";
+      const ctx = await ensureAudioRunningInGesture();
+      const afterState = ctx.state;
+      console.log(
+        `[poly420] Play tap resume state: ${beforeState} -> ${afterState}`
+      );
 
-    setPlaying(true);
+      // Start playing only after audio is actually running
+      restartTransportRef.current = true;
+      setPlaying(true);
+    } catch (e) {
+      console.warn("[poly420] Unable to start audio (needs user gesture?)", e);
+      // Make sure UI stays stopped if iOS rejects resume
+      stopAudioHard();
+    }
   };
 
   const updateTempo = (next: number) => {
@@ -758,7 +831,8 @@ export default function Poly420() {
                                 }`}
                                 style={{
                                   ["--index" as any]: index.toString(),
-                                  ["--beats" as any]: track.beatsPerCycle.toString(),
+                                  ["--beats" as any]:
+                                    track.beatsPerCycle.toString(),
                                 }}
                               />
                             )
