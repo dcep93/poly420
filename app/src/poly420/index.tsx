@@ -242,8 +242,15 @@ export default function Poly420() {
       return undefined;
     }
 
-    const ctx = new AudioContext();
+    const ctx =
+      audioContextRef.current && audioContextRef.current.state !== "closed"
+        ? audioContextRef.current
+        : new AudioContext();
     audioContextRef.current = ctx;
+
+    if (ctx.state === "suspended") {
+      void ctx.resume();
+    }
     const startAt = ctx.currentTime + 0.05;
     startTimeRef.current = startAt;
     nextCycleRef.current = 0;
@@ -332,11 +339,28 @@ export default function Poly420() {
   }, [cycleProgress, playing]);
 
   const togglePlay = () => {
-    if (audioContextRef.current) {
-      void audioContextRef.current.close();
-      audioContextRef.current = null;
+    const existingContext = audioContextRef.current;
+
+    if (playing) {
+      if (existingContext) {
+        void existingContext.close();
+        audioContextRef.current = null;
+      }
+      setPlaying(false);
+      return;
     }
-    setPlaying((prev) => !prev);
+
+    const ctx =
+      existingContext && existingContext.state !== "closed"
+        ? existingContext
+        : new AudioContext();
+    audioContextRef.current = ctx;
+
+    if (ctx.state === "suspended") {
+      void ctx.resume();
+    }
+
+    setPlaying(true);
   };
 
   const updateTempo = (next: number) => {
