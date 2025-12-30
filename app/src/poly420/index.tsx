@@ -45,7 +45,92 @@ const clampTempo = (tempo: number) =>
   Math.min(240, Math.max(1, Math.round(tempo)));
 let trackCounter = DEFAULT_TRACKS.length + 1;
 
-function scheduleClick(
+function isIOSChromeLikeWebView() {
+  const ua = navigator.userAgent || "";
+  const isIOS =
+    /iP(hone|od|ad)/.test(ua) ||
+    (ua.includes("Mac") && (navigator as any).maxTouchPoints > 1);
+  // On iOS, all browsers are WebKit/WKWebView. Chrome/Edge/Brave include "CriOS"/"EdgiOS".
+  const isChromeiOS = /CriOS|EdgiOS|Brave/i.test(ua);
+  return isIOS && isChromeiOS;
+}
+
+// iOS Chrome (WKWebView) can report AudioContext "running" yet output nothing;
+// scheduling clicks via <audio> uses the HTMLMediaElement audio path (Spotify-style),
+// which is much more reliable in iOS Chrome than pure WebAudio.
+function makeWavDataUri({
+  freq,
+  durationSec,
+  sampleRate,
+  volume,
+  type,
+}: {
+  freq: number;
+  durationSec: number;
+  sampleRate: number;
+  volume: number;
+  type: "sine" | "square";
+}) {
+  const n = Math.max(1, Math.floor(sampleRate * durationSec));
+  const pcm = new Int16Array(n);
+
+  const fadeN = Math.min(Math.floor(sampleRate * 0.006), Math.floor(n / 2));
+
+  for (let i = 0; i < n; i++) {
+    const t = i / sampleRate;
+    let amp = volume;
+
+    if (i < fadeN) amp *= i / fadeN;
+    else if (i > n - fadeN) amp *= (n - i) / fadeN;
+
+    const s =
+      type === "square"
+        ? Math.sin(2 * Math.PI * freq * t) >= 0
+          ? 1
+          : -1
+        : Math.sin(2 * Math.PI * freq * t);
+
+    const v = Math.max(-1, Math.min(1, s * amp));
+    pcm[i] = (v * 0x7fff) | 0;
+  }
+
+  const bytesPerSample = 2;
+  const blockAlign = 1 * bytesPerSample; // mono
+  const byteRate = sampleRate * blockAlign;
+  const dataSize = n * bytesPerSample;
+
+  const buffer = new ArrayBuffer(44 + dataSize);
+  const view = new DataView(buffer);
+
+  const writeStr = (off: number, s: string) => {
+    for (let i = 0; i < s.length; i++) view.setUint8(off + i, s.charCodeAt(i));
+  };
+
+  writeStr(0, "RIFF");
+  view.setUint32(4, 36 + dataSize, true);
+  writeStr(8, "WAVE");
+  writeStr(12, "fmt ");
+  view.setUint32(16, 16, true);
+  view.setUint16(20, 1, true); // PCM
+  view.setUint16(22, 1, true); // channels
+  view.setUint32(24, sampleRate, true);
+  view.setUint32(28, byteRate, true);
+  view.setUint16(32, blockAlign, true);
+  view.setUint16(34, 16, true);
+  writeStr(36, "data");
+  view.setUint32(40, dataSize, true);
+
+  let o = 44;
+  for (let i = 0; i < n; i++, o += 2) view.setInt16(o, pcm[i], true);
+
+  const u8 = new Uint8Array(buffer);
+  let bin = "";
+  for (let i = 0; i < u8.length; i++) bin += String.fromCharCode(u8[i]);
+  const b64 = btoa(bin);
+  return `data:audio/wav;base64,${b64}`;
+}
+
+function scheduleClickWebAudio(
   ctx: AudioContext,
   time: number,
   frequency: number,
@@ -211,9 +296,32 @@ export default function Poly420() {
   const [snapBeats, setSnapBeats] = useState(false);
 
   const audioContextRef = useRef<AudioContext | null>(null);
+
+  // WebAudio timing
   const startTimeRef = useRef(0);
   const nextCycleRef = useRef(0);
+
+  // HTMLMediaElement timing (iOS Chrome fallback)
+  const startPerfRef = useRef(0);
+  const nextCyclePerfRef = useRef(0);
+
   const prevCycleProgressRef = useRef(0);
+
+  // <audio> pool for iOS Chrome click playback
+  const audioPoolRef = useRef<HTMLAudioElement[]>([]);
+  const audioPoolIxRef = useRef(0);
+  const samplesRef = useRef<Map<string, string>>(new Map());
+  const didPrimeMediaRef = useRef(false);
+
+  const useHtmlAudioEngine = useMemo(() => isIOSChromeLikeWebView(), []);
+
+  const cycleDuration = useMemo(() => 60 / tempo, [tempo]);
+
+  const audibleTracks = useMemo(() => {
+    const focused = tracks.filter((track) => track.deafened);
+    const base = focused.length > 0 ? focused : tracks;
+    return base.filter((track) => !track.muted);
+  }, [tracks]);
 
   const ensureAudioRunning = useCallback(async () => {
     let ctx = audioContextRef.current;
@@ -228,7 +336,7 @@ export default function Poly420() {
     }
 
     if (ctx.state !== "running") {
-      await ctx.resume();
+      await ctx.resume().catch(() => {});
     }
 
     return ctx;
@@ -239,19 +347,93 @@ export default function Poly420() {
     if (existingContext && existingContext.state !== "closed") {
       existingContext.close().catch(() => {});
     }
-
     audioContextRef.current = null;
     startTimeRef.current = 0;
     nextCycleRef.current = 0;
   }, []);
 
-  const cycleDuration = useMemo(() => 60 / tempo, [tempo]);
+  const ensureAudioPool = useCallback(() => {
+    if (audioPoolRef.current.length > 0) return;
 
-  const audibleTracks = useMemo(() => {
-    const focused = tracks.filter((track) => track.deafened);
-    const base = focused.length > 0 ? focused : tracks;
-    return base.filter((track) => !track.muted);
-  }, [tracks]);
+    // pool size: enough for overlapping clicks across tracks
+    const POOL = 32;
+    const pool: HTMLAudioElement[] = [];
+    for (let i = 0; i < POOL; i++) {
+      const a = new Audio();
+      a.preload = "auto";
+      a.playsInline = true;
+      pool.push(a);
+    }
+    audioPoolRef.current = pool;
+  }, []);
+
+  const getSampleUri = useCallback((freq: number, accent: boolean) => {
+    const key = `${freq}:${accent ? "a" : "n"}`;
+    const hit = samplesRef.current.get(key);
+    if (hit) return hit;
+
+    // Shorter for tighter rhythms. Accent uses square for punch.
+    const uri = makeWavDataUri({
+      freq,
+      durationSec: accent ? 0.085 : 0.06,
+      sampleRate: 44100,
+      volume: accent ? 0.95 : 0.7,
+      type: accent ? "square" : "sine",
+    });
+
+    samplesRef.current.set(key, uri);
+    return uri;
+  }, []);
+
+  const primeMediaOnce = useCallback(async () => {
+    if (didPrimeMediaRef.current) return;
+    ensureAudioPool();
+
+    // "Prime" the media stack on iOS by doing a real play() in the gesture.
+    // We use a tiny (inaudible) sample at volume 0 so later plays work reliably.
+    const pool = audioPoolRef.current;
+    const a = pool[0];
+    a.src = getSampleUri(440, false);
+    a.volume = 0;
+
+    try {
+      a.currentTime = 0;
+    } catch {}
+    try {
+      await a.play();
+      a.pause();
+      try {
+        a.currentTime = 0;
+      } catch {}
+      didPrimeMediaRef.current = true;
+    } catch {
+      // If even this fails, you're not in a trusted gesture; caller must be a click/tap handler.
+    } finally {
+      a.volume = 1;
+    }
+  }, [ensureAudioPool, getSampleUri]);
+
+  const playClickHtml = useCallback(
+    (freq: number, accent: boolean, volume: number) => {
+      ensureAudioPool();
+      const pool = audioPoolRef.current;
+      const ix = audioPoolIxRef.current++ % pool.length;
+      const a = pool[ix];
+
+      a.src = getSampleUri(freq, accent);
+      // clamp + apply per-track volume
+      a.volume = Math.min(1, Math.max(0, volume));
+
+      try {
+        a.currentTime = 0;
+      } catch {}
+
+      void a.play().catch(() => {
+        // if play fails, it's almost always "not in gesture" — the play button primes it
+      });
+    },
+    [ensureAudioPool, getSampleUri]
+  );
 
   useEffect(() => {
     const hash = encodeState(tempo, tracks, darkMode);
@@ -269,6 +451,57 @@ export default function Poly420() {
 
     const setup = async () => {
       if (!playing) return;
+
+      if (useHtmlAudioEngine) {
+        // HTML <audio> scheduler (iOS Chrome)
+        const startAt = performance.now() + 120; // give the pool a tiny head start
+        startPerfRef.current = startAt;
+        nextCyclePerfRef.current = 0;
+
+        const scheduleAheadMs = 700;
+
+        const schedule = () => {
+          const now = performance.now();
+          const until = now + scheduleAheadMs;
+
+          while (
+            startPerfRef.current +
+              nextCyclePerfRef.current * cycleDuration * 1000 <
+            until
+          ) {
+            const cycleStartMs =
+              startPerfRef.current +
+              nextCyclePerfRef.current * cycleDuration * 1000;
+
+            audibleTracks.forEach((track) => {
+              const frequency = PITCHES[track.pitchIndex % PITCHES.length];
+              for (let beat = 0; beat < track.beatsPerCycle; beat += 1) {
+                const beatMomentMs =
+                  cycleStartMs +
+                  (cycleDuration * 1000 * beat) / track.beatsPerCycle;
+
+                const delay = beatMomentMs - performance.now();
+                if (delay <= 0) {
+                  playClickHtml(frequency, beat === 0, track.volume);
+                } else {
+                  window.setTimeout(() => {
+                    if (!cancelled && playing) {
+                      playClickHtml(frequency, beat === 0, track.volume);
+                    }
+                  }, delay);
+                }
+              }
+            });
+
+            nextCyclePerfRef.current += 1;
+          }
+        };
+
+        interval = window.setInterval(schedule, 40);
+        return;
+      }
+
+      // WebAudio scheduler (desktop + iOS Safari generally)
       const ctx =
         audioContextRef.current && audioContextRef.current.state !== "closed"
           ? audioContextRef.current
@@ -295,7 +528,7 @@ export default function Poly420() {
             for (let beat = 0; beat < track.beatsPerCycle; beat += 1) {
               const beatMoment =
                 cycleStart + (cycleDuration * beat) / track.beatsPerCycle;
-              scheduleClick(
+              scheduleClickWebAudio(
                 ctx,
                 beatMoment,
                 frequency,
@@ -316,17 +549,45 @@ export default function Poly420() {
 
     return () => {
       cancelled = true;
-      if (interval !== null) {
-        window.clearInterval(interval);
-      }
-      resetAudioContext();
+      if (interval !== null) window.clearInterval(interval);
+
+      // Only close WebAudio context for the WebAudio engine.
+      if (!useHtmlAudioEngine) resetAudioContext();
+
+      startPerfRef.current = 0;
+      nextCyclePerfRef.current = 0;
     };
-  }, [playing, cycleDuration, audibleTracks, ensureAudioRunning, resetAudioContext]);
+  }, [
+    playing,
+    cycleDuration,
+    audibleTracks,
+    ensureAudioRunning,
+    resetAudioContext,
+    useHtmlAudioEngine,
+    playClickHtml,
+  ]);
 
   useEffect(() => {
     let frame: number | null = null;
 
     const update = () => {
+      if (!playing) {
+        setCycleProgress(0);
+        frame = null;
+        return;
+      }
+
+      if (useHtmlAudioEngine) {
+        const elapsedMs = Math.max(0, performance.now() - startPerfRef.current);
+        const position =
+          cycleDuration > 0
+            ? ((elapsedMs / 1000) % cycleDuration) / cycleDuration
+            : 0;
+        setCycleProgress(position);
+        frame = requestAnimationFrame(update);
+        return;
+      }
+
       const ctx = audioContextRef.current;
       if (!ctx) {
         setCycleProgress(0);
@@ -348,11 +609,9 @@ export default function Poly420() {
     }
 
     return () => {
-      if (frame !== null) {
-        cancelAnimationFrame(frame);
-      }
+      if (frame !== null) cancelAnimationFrame(frame);
     };
-  }, [playing, cycleDuration]);
+  }, [playing, cycleDuration, useHtmlAudioEngine]);
 
   useEffect(() => {
     const prev = prevCycleProgressRef.current;
@@ -365,27 +624,30 @@ export default function Poly420() {
       return () => cancelAnimationFrame(handle);
     }
 
-    if (!playing) {
-      setSnapBeats(false);
-    }
+    if (!playing) setSnapBeats(false);
   }, [cycleProgress, playing]);
 
   const togglePlay = async () => {
-    const existingContext = audioContextRef.current;
-
     if (playing) {
       setPlaying(false);
-      resetAudioContext();
+      if (!useHtmlAudioEngine) resetAudioContext();
       return;
     }
 
+    if (useHtmlAudioEngine) {
+      // MUST happen inside the tap gesture for iOS Chrome: primes HTMLMediaElement playback.
+      await primeMediaOnce();
+      setPlaying(true);
+      return;
+    }
+
+    const existingContext = audioContextRef.current;
     const beforeState = existingContext?.state ?? "none";
     const ctx = await ensureAudioRunning();
     const afterState = ctx.state;
     console.log(
       `[poly420] Play tap resume state: ${beforeState} -> ${afterState}`
     );
-
     setPlaying(true);
   };
 
@@ -625,6 +887,21 @@ export default function Poly420() {
                 </div>
               );
             })}
+          </div>
+
+          {/* tiny debug hint without changing your CSS/layout much */}
+          <div
+            style={{
+              opacity: 0.5,
+              fontFamily: "monospace",
+              fontSize: 12,
+              padding: "10px 2px",
+            }}
+          >
+            engine:{" "}
+            {useHtmlAudioEngine
+              ? "html-audio (iOS Chrome fallback)"
+              : "webaudio"}
           </div>
         </div>
       </div>
