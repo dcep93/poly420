@@ -45,6 +45,81 @@ const clampTempo = (tempo: number) =>
   Math.min(240, Math.max(1, Math.round(tempo)));
 let trackCounter = DEFAULT_TRACKS.length + 1;
 
+// iOS Chrome (WKWebView) can report AudioContext "running" yet output nothing; piping a generated WAV
+// through an <audio> element uses the HTMLMediaElement audio path (the same one sites like Spotify use)
+// and is much more reliable on iOS than pure WebAudio.
+function makeWavDataUri({
+  freq,
+  durationSec,
+  sampleRate,
+  volume,
+  type,
+}: {
+  freq: number;
+  durationSec: number;
+  sampleRate: number;
+  volume: number;
+  type: "sine" | "square";
+}) {
+  const n = Math.max(1, Math.floor(sampleRate * durationSec));
+  const pcm = new Int16Array(n);
+
+  const fadeN = Math.min(Math.floor(sampleRate * 0.006), Math.floor(n / 2));
+
+  for (let i = 0; i < n; i++) {
+    const t = i / sampleRate;
+    let amp = volume;
+
+    if (i < fadeN) amp *= i / fadeN;
+    else if (i > n - fadeN) amp *= (n - i) / fadeN;
+
+    const s =
+      type === "square"
+        ? Math.sin(2 * Math.PI * freq * t) >= 0
+          ? 1
+          : -1
+        : Math.sin(2 * Math.PI * freq * t);
+
+    const v = Math.max(-1, Math.min(1, s * amp));
+    pcm[i] = (v * 0x7fff) | 0;
+  }
+
+  const bytesPerSample = 2;
+  const blockAlign = 1 * bytesPerSample; // mono
+  const byteRate = sampleRate * blockAlign;
+  const dataSize = n * bytesPerSample;
+
+  const buffer = new ArrayBuffer(44 + dataSize);
+  const view = new DataView(buffer);
+
+  const writeStr = (off: number, s: string) => {
+    for (let i = 0; i < s.length; i++) view.setUint8(off + i, s.charCodeAt(i));
+  };
+
+  writeStr(0, "RIFF");
+  view.setUint32(4, 36 + dataSize, true);
+  writeStr(8, "WAVE");
+  writeStr(12, "fmt ");
+  view.setUint32(16, 16, true);
+  view.setUint16(20, 1, true); // PCM
+  view.setUint16(22, 1, true); // channels
+  view.setUint32(24, sampleRate, true);
+  view.setUint32(28, byteRate, true);
+  view.setUint16(32, blockAlign, true);
+  view.setUint16(34, 16, true);
+  writeStr(36, "data");
+  view.setUint32(40, dataSize, true);
+
+  let o = 44;
+  for (let i = 0; i < n; i++, o += 2) view.setInt16(o, pcm[i], true);
+
+  const u8 = new Uint8Array(buffer);
+  let bin = "";
+  for (let i = 0; i < u8.length; i++) bin += String.fromCharCode(u8[i]);
+  const b64 = btoa(bin);
+  return `data:audio/wav;base64,${b64}`;
+}
+
 function scheduleClick(
   ctx: AudioContext,
   time: number,
@@ -215,14 +290,17 @@ export default function Poly420() {
   const startTimeRef = useRef(0);
   const nextCycleRef = useRef(0);
   const prevCycleProgressRef = useRef(0);
-  const testOscRef = useRef<OscillatorNode | null>(null);
-  const testGainRef = useRef<GainNode | null>(null);
-  const testToneFlagRef = useRef(false);
+
+  // Test tone via <audio> (reliable on iOS Chrome/WKWebView)
+  const testAudioRef = useRef<HTMLAudioElement | null>(null);
+  const testToneStopTimerRef = useRef<number | null>(null);
 
   const ensureAudioRunning = useCallback(async () => {
     let ctx = audioContextRef.current;
     const AudioCtor: typeof AudioContext =
-      window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
+      window.AudioContext ||
+      (window as unknown as { webkitAudioContext: typeof AudioContext })
+        .webkitAudioContext;
 
     if (!ctx || ctx.state === "closed") {
       ctx = new AudioCtor();
@@ -231,17 +309,6 @@ export default function Poly420() {
 
     if (ctx.state !== "running") {
       await ctx.resume();
-
-      const unlockOsc = ctx.createOscillator();
-      const unlockGain = ctx.createGain();
-      unlockGain.gain.setValueAtTime(0.0001, ctx.currentTime);
-      unlockGain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.02);
-      unlockGain.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + 0.05);
-      unlockOsc.frequency.setValueAtTime(440, ctx.currentTime);
-      unlockOsc.connect(unlockGain);
-      unlockGain.connect(ctx.destination);
-      unlockOsc.start();
-      unlockOsc.stop(ctx.currentTime + 0.06);
     }
 
     return ctx;
@@ -384,64 +451,84 @@ export default function Poly420() {
     const beforeState = existingContext?.state ?? "none";
     const ctx = await ensureAudioRunning();
     const afterState = ctx.state;
-    console.log(`[poly420] Play tap resume state: ${beforeState} -> ${afterState}`);
+    console.log(
+      `[poly420] Play tap resume state: ${beforeState} -> ${afterState}`
+    );
 
     setPlaying(true);
   };
 
   const stopTestTone = useCallback((immediate = false) => {
-    const osc = testOscRef.current;
-    const gain = testGainRef.current;
-    const ctx = osc?.context ?? gain?.context ?? audioContextRef.current;
+    if (testToneStopTimerRef.current !== null) {
+      window.clearTimeout(testToneStopTimerRef.current);
+      testToneStopTimerRef.current = null;
+    }
 
-    if (!osc || !gain || !ctx) return;
+    const el = testAudioRef.current;
+    if (!el) return;
 
-    const now = ctx.currentTime;
-    const endTime = immediate ? now : now + 0.12;
-    gain.gain.cancelScheduledValues(now);
-    gain.gain.setValueAtTime(gain.gain.value, now);
-    gain.gain.exponentialRampToValueAtTime(0.0001, endTime);
-    osc.stop(endTime + 0.02);
+    try {
+      if (immediate) {
+        el.pause();
+        el.currentTime = 0;
+      } else {
+        // quick fade-out by swapping to a quieter tail
+        const quietTail = makeWavDataUri({
+          freq: 440,
+          durationSec: 0.08,
+          sampleRate: 44100,
+          volume: 0.08,
+          type: "sine",
+        });
+        el.src = quietTail;
+        void el.play().catch(() => {});
+        testToneStopTimerRef.current = window.setTimeout(() => {
+          el.pause();
+          try {
+            el.currentTime = 0;
+          } catch {}
+          testToneStopTimerRef.current = null;
+        }, 90);
+      }
+    } catch {
+      // ignore
+    }
 
-    testOscRef.current = null;
-    testGainRef.current = null;
-    testToneFlagRef.current = false;
     setTestToneActive(false);
   }, []);
 
   const toggleTestTone = useCallback(async () => {
-    if (testToneFlagRef.current) {
+    if (testToneActive) {
       stopTestTone();
       return;
     }
 
-    const ctx = await ensureAudioRunning();
-    const osc = ctx.createOscillator();
-    const gain = ctx.createGain();
+    // Keep WebAudio ready for the actual sequencer, but play the test tone via <audio>.
+    await ensureAudioRunning();
 
-    gain.gain.setValueAtTime(0.0001, ctx.currentTime);
-    gain.gain.exponentialRampToValueAtTime(0.14, ctx.currentTime + 0.08);
+    const el = testAudioRef.current;
+    if (!el) return;
 
-    osc.type = "sine";
-    osc.frequency.setValueAtTime(440, ctx.currentTime);
-    osc.connect(gain);
-    gain.connect(ctx.destination);
-    osc.start();
+    const beep = makeWavDataUri({
+      freq: 440,
+      durationSec: 999, // long loop-ish tone; we'll stop it manually
+      sampleRate: 44100,
+      volume: 0.22,
+      type: "sine",
+    });
 
-    osc.onended = () => {
-      if (testOscRef.current === osc) {
-        testOscRef.current = null;
-        testGainRef.current = null;
-        testToneFlagRef.current = false;
-        setTestToneActive(false);
-      }
-    };
+    el.src = beep;
+    el.loop = true;
+    el.playsInline = true;
 
-    testOscRef.current = osc;
-    testGainRef.current = gain;
-    testToneFlagRef.current = true;
-    setTestToneActive(true);
-  }, [ensureAudioRunning, stopTestTone]);
+    try {
+      await el.play();
+      setTestToneActive(true);
+    } catch (e) {
+      console.log("[poly420] <audio> test tone play failed:", e);
+      setTestToneActive(false);
+    }
+  }, [ensureAudioRunning, stopTestTone, testToneActive]);
 
   const updateTempo = (next: number) => {
     setTempo(clampTempo(next));
@@ -518,6 +605,9 @@ export default function Poly420() {
 
   return (
     <div className={`poly420-shell ${darkMode ? "dark" : ""}`}>
+      {/* Hidden <audio> used for iOS-reliable test tone playback */}
+      <audio ref={testAudioRef} preload="auto" />
+
       <div className="page">
         <div className="top-row">
           <div className="hero">
@@ -536,6 +626,7 @@ export default function Poly420() {
                 {playing ? "⏹" : "▶"}
               </span>
             </button>
+
             <div className="tempo" aria-label="Tempo">
               <div className="tempo-row">
                 <input
@@ -551,6 +642,7 @@ export default function Poly420() {
                 />
               </div>
             </div>
+
             <div className="transport-side">
               <button
                 onClick={toggleTestTone}
@@ -559,6 +651,7 @@ export default function Poly420() {
               >
                 {testToneActive ? "Stop test tone" : "Test tone"}
               </button>
+
               <button
                 onClick={addTrack}
                 className="ghost round"
@@ -568,6 +661,7 @@ export default function Poly420() {
                   +
                 </span>
               </button>
+
               <button
                 className="icon-button"
                 onClick={() => setDarkMode((prev) => !prev)}
@@ -633,6 +727,7 @@ export default function Poly420() {
                           )}
                         </div>
                       </div>
+
                       <button
                         className="chip danger"
                         onClick={() => removeTrack(track.id)}
@@ -650,6 +745,7 @@ export default function Poly420() {
                       >
                         {track.muted ? "🔇" : "🔈"}
                       </button>
+
                       <div className="slider-wrap">
                         <label
                           className="sr-only"
@@ -672,6 +768,7 @@ export default function Poly420() {
                           }
                         />
                       </div>
+
                       <button
                         className={`chip ${track.deafened ? "active" : ""}`}
                         onClick={() => toggleDeafen(track.id)}
