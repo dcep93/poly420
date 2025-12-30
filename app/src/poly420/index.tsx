@@ -1,5 +1,6 @@
 import {
   type CSSProperties,
+  useCallback,
   useEffect,
   useMemo,
   useRef,
@@ -214,6 +215,27 @@ export default function Poly420() {
   const nextCycleRef = useRef(0);
   const prevCycleProgressRef = useRef(0);
 
+  const ensureAudioRunning = useCallback(async () => {
+    let ctx = audioContextRef.current;
+    if (!ctx || ctx.state === "closed") {
+      ctx = new AudioContext();
+      audioContextRef.current = ctx;
+    }
+
+    if (ctx.state !== "running") {
+      await ctx.resume();
+    }
+
+    const unlockBuffer = ctx.createBuffer(1, 1, ctx.sampleRate);
+    const unlockSource = ctx.createBufferSource();
+    unlockSource.buffer = unlockBuffer;
+    unlockSource.connect(ctx.destination);
+    unlockSource.start(0);
+    unlockSource.stop(0);
+
+    return ctx;
+  }, []);
+
   const cycleDuration = useMemo(() => 60 / tempo, [tempo]);
 
   const audibleTracks = useMemo(() => {
@@ -233,64 +255,63 @@ export default function Poly420() {
   }, [darkMode]);
 
   useEffect(() => {
-    if (!playing) {
+    let interval: number | null = null;
+    let cancelled = false;
+
+    const setup = async () => {
+      if (!playing) return;
+      const ctx =
+        audioContextRef.current && audioContextRef.current.state !== "closed"
+          ? audioContextRef.current
+          : await ensureAudioRunning();
+
+      if (cancelled) return;
+
+      const startAt = ctx.currentTime + 0.05;
+      startTimeRef.current = startAt;
       nextCycleRef.current = 0;
-      if (audioContextRef.current) {
-        void audioContextRef.current.close();
-        audioContextRef.current = null;
-      }
-      return undefined;
-    }
 
-    const ctx =
-      audioContextRef.current && audioContextRef.current.state !== "closed"
-        ? audioContextRef.current
-        : new AudioContext();
-    audioContextRef.current = ctx;
+      const scheduleAhead = 0.7;
 
-    if (ctx.state === "suspended") {
-      void ctx.resume();
-    }
-    const startAt = ctx.currentTime + 0.05;
-    startTimeRef.current = startAt;
-    nextCycleRef.current = 0;
+      const schedule = () => {
+        const until = ctx.currentTime + scheduleAhead;
+        while (
+          startTimeRef.current + nextCycleRef.current * cycleDuration <
+          until
+        ) {
+          const cycleStart =
+            startTimeRef.current + nextCycleRef.current * cycleDuration;
+          audibleTracks.forEach((track) => {
+            const frequency = PITCHES[track.pitchIndex % PITCHES.length];
+            for (let beat = 0; beat < track.beatsPerCycle; beat += 1) {
+              const beatMoment =
+                cycleStart + (cycleDuration * beat) / track.beatsPerCycle;
+              scheduleClick(
+                ctx,
+                beatMoment,
+                frequency,
+                beat === 0,
+                track.beatsPerCycle,
+                track.volume
+              );
+            }
+          });
+          nextCycleRef.current += 1;
+        }
+      };
 
-    const scheduleAhead = 0.7;
-
-    const schedule = () => {
-      const until = ctx.currentTime + scheduleAhead;
-      while (
-        startTimeRef.current + nextCycleRef.current * cycleDuration <
-        until
-      ) {
-        const cycleStart =
-          startTimeRef.current + nextCycleRef.current * cycleDuration;
-        audibleTracks.forEach((track) => {
-          const frequency = PITCHES[track.pitchIndex % PITCHES.length];
-          for (let beat = 0; beat < track.beatsPerCycle; beat += 1) {
-            const beatMoment =
-              cycleStart + (cycleDuration * beat) / track.beatsPerCycle;
-            scheduleClick(
-              ctx,
-              beatMoment,
-              frequency,
-              beat === 0,
-              track.beatsPerCycle,
-              track.volume
-            );
-          }
-        });
-        nextCycleRef.current += 1;
-      }
+      interval = window.setInterval(schedule, 40);
     };
 
-    const interval = window.setInterval(schedule, 40);
+    void setup();
+
     return () => {
-      window.clearInterval(interval);
-      void ctx.close();
-      audioContextRef.current = null;
+      cancelled = true;
+      if (interval !== null) {
+        window.clearInterval(interval);
+      }
     };
-  }, [playing, cycleDuration, audibleTracks]);
+  }, [playing, cycleDuration, audibleTracks, ensureAudioRunning]);
 
   useEffect(() => {
     let frame: number | null = null;
@@ -338,27 +359,21 @@ export default function Poly420() {
     }
   }, [cycleProgress, playing]);
 
-  const togglePlay = () => {
+  const togglePlay = async () => {
     const existingContext = audioContextRef.current;
 
     if (playing) {
-      if (existingContext) {
-        void existingContext.close();
-        audioContextRef.current = null;
-      }
       setPlaying(false);
+      if (existingContext && existingContext.state === "running") {
+        await existingContext.suspend();
+      }
       return;
     }
 
-    const ctx =
-      existingContext && existingContext.state !== "closed"
-        ? existingContext
-        : new AudioContext();
-    audioContextRef.current = ctx;
-
-    if (ctx.state === "suspended") {
-      void ctx.resume();
-    }
+    const beforeState = existingContext?.state ?? "none";
+    const ctx = await ensureAudioRunning();
+    const afterState = ctx.state;
+    console.log(`[poly420] Play tap resume state: ${beforeState} -> ${afterState}`);
 
     setPlaying(true);
   };
