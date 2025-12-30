@@ -310,6 +310,13 @@ export default function Poly420() {
       if (interval !== null) {
         window.clearInterval(interval);
       }
+      startTimeRef.current = 0;
+      nextCycleRef.current = 0;
+      const ctx = audioContextRef.current;
+      if (ctx && ctx.state !== "closed") {
+        void ctx.close();
+      }
+      audioContextRef.current = null;
     };
   }, [playing, cycleDuration, audibleTracks, ensureAudioRunning]);
 
@@ -320,6 +327,7 @@ export default function Poly420() {
       const ctx = audioContextRef.current;
       if (!ctx) {
         setCycleProgress(0);
+        frame = requestAnimationFrame(update);
         return;
       }
 
