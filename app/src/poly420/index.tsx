@@ -328,15 +328,16 @@ export default function Poly420() {
     };
   }, []);
 
-  // <audio> pool ONLY for priming iOS Chrome media stack
+  // <audio> pool (used for iOS priming + HTML audio fallback)
   type PoolAudio = HTMLAudioElement & { __poly420SampleKey?: string };
 
   const audioPoolRef = useRef<PoolAudio[]>([]);
+  const audioPoolIndexRef = useRef(0);
   const samplesRef = useRef<Map<string, string>>(new Map());
-  const didPrimeMediaRef = useRef(false);
+  const pendingHtmlTimersRef = useRef<number[]>([]);
 
-  // Precision mode: ALWAYS use WebAudio scheduling/playback.
-  const useHtmlAudioEngine = false;
+  // Prefer HTML audio on iOS Chrome/WKWebView where WebAudio is often blocked.
+  const useHtmlAudioEngine = isIOSChromeLikeWebView();
 
   const cycleDuration = useMemo(() => 60 / tempo, [tempo]);
 
@@ -416,6 +417,19 @@ export default function Poly420() {
   const stopAudioHard = useCallback(() => {
     setPlaying(false);
 
+    pendingHtmlTimersRef.current.forEach((handle) => clearTimeout(handle));
+    pendingHtmlTimersRef.current = [];
+    audioPoolIndexRef.current = 0;
+
+    if (useHtmlAudioEngine) {
+      audioPoolRef.current.forEach((audio) => {
+        try {
+          audio.pause();
+          audio.currentTime = 0;
+        } catch {}
+      });
+    }
+
     const ctx = audioContextRef.current;
 
     try {
@@ -434,7 +448,7 @@ export default function Poly420() {
       ctx.close().catch(() => {});
     }
     audioContextRef.current = null;
-  }, []);
+  }, [useHtmlAudioEngine]);
 
   const ensureAudioPool = useCallback(() => {
     if (audioPoolRef.current.length > 0) return;
@@ -471,37 +485,90 @@ export default function Poly420() {
     return uri;
   }, []);
 
-  const primeMediaOnceInGesture = useCallback(async () => {
-    if (didPrimeMediaRef.current) return;
+  const primeMediaPoolInGesture = useCallback(async () => {
     ensureAudioPool();
 
-    const a = audioPoolRef.current[0];
-    a.src = getSampleUri(440, false);
+    const sample = getSampleUri(440, false);
+    const pool = audioPoolRef.current;
 
-    // iOS is increasingly hostile to "volume=0 unlock". Use muted + tiny volume.
-    a.muted = true;
-    a.volume = 1;
+    const primeOne = async (a: PoolAudio) => {
+      a.src = sample;
+      // iOS is increasingly hostile to "volume=0 unlock". Use muted + tiny volume.
+      a.muted = true;
+      a.volume = 1;
 
-    try {
       try {
-        a.currentTime = 0;
-      } catch {}
-      const p = a.play();
-      // Some WKWebView builds return undefined; normalize
-      if (p && typeof (p as Promise<void>).then === "function") {
-        await p;
+        try {
+          a.currentTime = 0;
+        } catch {}
+
+        const p = a.play();
+        // Some WKWebView builds return undefined; normalize
+        if (p && typeof (p as Promise<void>).then === "function") {
+          await p;
+        }
+        a.pause();
+        try {
+          a.currentTime = 0;
+        } catch {}
+      } catch {
+        // Best effort only; WebAudio path will still try next.
+      } finally {
+        a.muted = false;
       }
-      a.pause();
-      try {
-        a.currentTime = 0;
-      } catch {}
-      didPrimeMediaRef.current = true;
-    } catch {
-      // If this fails, it wasn't a trusted gesture (or policy changed). We'll still try WebAudio.
-    } finally {
-      a.muted = false;
-    }
+    };
+
+    await Promise.all(pool.map(primeOne));
   }, [ensureAudioPool, getSampleUri]);
+
+  const playSampleWithHtmlAudio = useCallback(
+    ({
+      when,
+      frequency,
+      accent,
+      volume,
+    }: {
+      when: number;
+      frequency: number;
+      accent: boolean;
+      volume: number;
+    }) => {
+      ensureAudioPool();
+      const pool = audioPoolRef.current;
+      if (pool.length === 0) return;
+
+      const now = performance.now() / 1000;
+      const delayMs = Math.max(0, Math.round((when - now) * 1000));
+
+      const index = audioPoolIndexRef.current % pool.length;
+      audioPoolIndexRef.current = (audioPoolIndexRef.current + 1) % pool.length;
+      const audio = pool[index];
+
+      audio.pause();
+      try {
+        audio.currentTime = 0;
+      } catch {}
+
+      audio.src = getSampleUri(frequency, accent);
+      audio.volume = Math.max(0, Math.min(1, volume));
+      audio.muted = false;
+
+      const playNow = () => {
+        const playPromise = audio.play();
+        if (playPromise && typeof playPromise.then === "function") {
+          playPromise.catch(() => {});
+        }
+      };
+
+      if (delayMs <= 4) {
+        playNow();
+      } else {
+        const timer = window.setTimeout(playNow, delayMs);
+        pendingHtmlTimersRef.current.push(timer);
+      }
+    },
+    [ensureAudioPool, getSampleUri]
+  );
 
   useEffect(() => {
     const hash = encodeState(tempo, tracks, darkMode);
@@ -525,6 +592,50 @@ export default function Poly420() {
 
     const schedule = () => {
       if (cancelled) return;
+
+      if (useHtmlAudioEngine) {
+        const now = performance.now() / 1000;
+
+        if (restartTransportRef.current || startTimeRef.current === 0) {
+          const startAt = now + 0.06;
+          startTimeRef.current = startAt;
+          nextCycleRef.current = 0;
+          scheduledUntilRef.current = startAt;
+          restartTransportRef.current = false;
+        }
+
+        const cycleDur = cycleDurationRef.current;
+        const tracksNow = audibleTracksRef.current;
+        const until = now + scheduleAhead;
+
+        while (scheduledUntilRef.current < until) {
+          const cycleIndex = nextCycleRef.current;
+          const cycleStart = startTimeRef.current + cycleIndex * cycleDur;
+
+          if (cycleStart < now - 0.2) {
+            restartTransportRef.current = true;
+            return;
+          }
+
+          tracksNow.forEach((track) => {
+            const frequency = PITCHES[track.pitchIndex % PITCHES.length];
+            for (let beat = 0; beat < track.beatsPerCycle; beat += 1) {
+              const beatMoment =
+                cycleStart + (cycleDur * beat) / track.beatsPerCycle;
+              playSampleWithHtmlAudio({
+                when: beatMoment,
+                frequency,
+                accent: beat === 0,
+                volume: track.volume,
+              });
+            }
+          });
+
+          nextCycleRef.current += 1;
+          scheduledUntilRef.current = cycleStart + cycleDur;
+        }
+        return;
+      }
 
       const ctx = audioContextRef.current;
       if (!ctx || ctx.state !== "running") {
@@ -597,7 +708,7 @@ export default function Poly420() {
       window.removeEventListener("pageshow", onVisibility);
       // DO NOT close context here. Only Stop/unmount closes.
     };
-  }, [playing]);
+  }, [playSampleWithHtmlAudio, playing, useHtmlAudioEngine]);
 
   // CSS progress loop (read-only; doesn't touch audio engine)
   useEffect(() => {
@@ -611,14 +722,22 @@ export default function Poly420() {
       }
 
       const ctx = audioContextRef.current;
-      if (!ctx || ctx.state !== "running" || startTimeRef.current === 0) {
+      const now = useHtmlAudioEngine
+        ? performance.now() / 1000
+        : ctx?.currentTime ?? null;
+
+      if (
+        now === null ||
+        (!useHtmlAudioEngine && ctx?.state !== "running") ||
+        startTimeRef.current === 0
+      ) {
         setCycleProgressCss(0);
         frame = requestAnimationFrame(update);
         return;
       }
 
       const cycleDur = cycleDurationRef.current;
-      const elapsed = Math.max(0, ctx.currentTime - startTimeRef.current);
+      const elapsed = Math.max(0, now - startTimeRef.current);
       const position = cycleDur > 0 ? (elapsed % cycleDur) / cycleDur : 0;
       setCycleProgressCss(position);
       frame = requestAnimationFrame(update);
@@ -633,7 +752,7 @@ export default function Poly420() {
     return () => {
       if (frame !== null) cancelAnimationFrame(frame);
     };
-  }, [playing, setCycleProgressCss]);
+  }, [playing, setCycleProgressCss, useHtmlAudioEngine]);
 
   const togglePlay = async () => {
     if (playingRef.current) {
@@ -641,9 +760,38 @@ export default function Poly420() {
       return;
     }
 
-    // Unlock iOS Chrome-like media stack inside the gesture (best-effort)
-    if (isIOSChromeLikeWebView()) {
-      await primeMediaOnceInGesture();
+    // Unlock media stack inside the gesture (best-effort)
+    await primeMediaPoolInGesture();
+
+    if (useHtmlAudioEngine) {
+      const now = performance.now() / 1000;
+      const cycleDur = cycleDurationRef.current;
+      const tracksNow = audibleTracksRef.current;
+
+      const startAt = now + 0.05;
+      startTimeRef.current = startAt;
+      nextCycleRef.current = 0;
+      scheduledUntilRef.current = startAt;
+      restartTransportRef.current = false;
+
+      tracksNow.forEach((track) => {
+        const frequency = PITCHES[track.pitchIndex % PITCHES.length];
+        for (let beat = 0; beat < track.beatsPerCycle; beat += 1) {
+          const beatMoment = startAt + (cycleDur * beat) / track.beatsPerCycle;
+          playSampleWithHtmlAudio({
+            when: beatMoment,
+            frequency,
+            accent: beat === 0,
+            volume: track.volume,
+          });
+        }
+      });
+
+      nextCycleRef.current = 1;
+      scheduledUntilRef.current = startAt + cycleDur;
+
+      setPlaying(true);
+      return;
     }
 
     try {
