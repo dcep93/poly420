@@ -221,21 +221,28 @@ export default function Poly420() {
 
   const ensureAudioRunning = useCallback(async () => {
     let ctx = audioContextRef.current;
+    const AudioCtor: typeof AudioContext =
+      window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
+
     if (!ctx || ctx.state === "closed") {
-      ctx = new AudioContext();
+      ctx = new AudioCtor();
       audioContextRef.current = ctx;
     }
 
     if (ctx.state !== "running") {
       await ctx.resume();
-    }
 
-    const unlockBuffer = ctx.createBuffer(1, 1, ctx.sampleRate);
-    const unlockSource = ctx.createBufferSource();
-    unlockSource.buffer = unlockBuffer;
-    unlockSource.connect(ctx.destination);
-    unlockSource.start();
-    unlockSource.stop(ctx.currentTime + 0.01);
+      const unlockOsc = ctx.createOscillator();
+      const unlockGain = ctx.createGain();
+      unlockGain.gain.setValueAtTime(0.0001, ctx.currentTime);
+      unlockGain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.02);
+      unlockGain.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + 0.05);
+      unlockOsc.frequency.setValueAtTime(440, ctx.currentTime);
+      unlockOsc.connect(unlockGain);
+      unlockGain.connect(ctx.destination);
+      unlockOsc.start();
+      unlockOsc.stop(ctx.currentTime + 0.06);
+    }
 
     return ctx;
   }, []);
@@ -253,25 +260,6 @@ export default function Poly420() {
     const base = `${window.location.pathname}${window.location.search}`;
     window.history.replaceState(null, "", `${base}${hash}`);
   }, [tempo, tracks, darkMode]);
-
-  useEffect(() => {
-    const attemptUnlock = () => {
-      void ensureAudioRunning();
-      window.removeEventListener("touchstart", attemptUnlock);
-      window.removeEventListener("pointerdown", attemptUnlock);
-      window.removeEventListener("keydown", attemptUnlock);
-    };
-
-    window.addEventListener("touchstart", attemptUnlock, { passive: true });
-    window.addEventListener("pointerdown", attemptUnlock, { passive: true });
-    window.addEventListener("keydown", attemptUnlock);
-
-    return () => {
-      window.removeEventListener("touchstart", attemptUnlock);
-      window.removeEventListener("pointerdown", attemptUnlock);
-      window.removeEventListener("keydown", attemptUnlock);
-    };
-  }, [ensureAudioRunning]);
 
   useEffect(() => {
     document.body.classList.toggle("poly420-dark", darkMode);
@@ -335,10 +323,6 @@ export default function Poly420() {
       }
       startTimeRef.current = 0;
       nextCycleRef.current = 0;
-      const ctx = audioContextRef.current;
-      if (ctx && ctx.state === "running" && !testToneFlagRef.current) {
-        void ctx.suspend();
-      }
     };
   }, [playing, cycleDuration, audibleTracks, ensureAudioRunning]);
 
@@ -394,9 +378,6 @@ export default function Poly420() {
 
     if (playing) {
       setPlaying(false);
-      if (existingContext && existingContext.state === "running") {
-        await existingContext.suspend();
-      }
       return;
     }
 
