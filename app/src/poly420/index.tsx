@@ -343,7 +343,7 @@ export default function Poly420() {
       <div className="page">
         <div className="top-row">
           <div className="hero">
-            <h1 title={`#${recorded_sha}`}>🥁 Poly420 🥁</h1>
+            <h1 title={recorded_sha}>🥁 Poly420 🥁</h1>
           </div>
         </div>
 
