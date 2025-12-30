@@ -361,7 +361,7 @@ export default function Poly420() {
     for (let i = 0; i < POOL; i++) {
       const a = new Audio();
       a.preload = "auto";
-      a.playsInline = true;
+      (a as any).playsInline = true;
       pool.push(a);
     }
     audioPoolRef.current = pool;
