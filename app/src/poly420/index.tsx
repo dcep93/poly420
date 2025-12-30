@@ -1,4 +1,10 @@
-import { type CSSProperties, useEffect, useMemo, useRef, useState } from "react";
+import {
+  type CSSProperties,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import recorded_sha from "./recorded_sha";
 import "./styles.css";
 
@@ -34,7 +40,8 @@ const DEFAULT_TRACKS: Track[] = [
   },
 ];
 
-const clampTempo = (tempo: number) => Math.min(240, Math.max(1, Math.round(tempo)));
+const clampTempo = (tempo: number) =>
+  Math.min(240, Math.max(1, Math.round(tempo)));
 let trackCounter = DEFAULT_TRACKS.length + 1;
 
 function scheduleClick(
@@ -43,7 +50,7 @@ function scheduleClick(
   frequency: number,
   accent: boolean,
   density: number,
-  volume: number,
+  volume: number
 ) {
   const osc = ctx.createOscillator();
   const gain = ctx.createGain();
@@ -103,7 +110,9 @@ function encodeState(tempo: number, tracks: Track[], darkMode: boolean) {
       .map((track) => {
         const volumePercent = Math.round(track.volume * 100);
         const volumeFlag =
-          volumePercent !== Math.round(DEFAULT_VOLUME * 100) ? `v${volumePercent}` : "";
+          volumePercent !== Math.round(DEFAULT_VOLUME * 100)
+            ? `v${volumePercent}`
+            : "";
         const muteFlag = track.muted ? "m" : "";
         const deafFlag = track.deafened ? "d" : "";
         return `${track.beatsPerCycle}${volumeFlag}${muteFlag}${deafFlag}`;
@@ -120,9 +129,12 @@ function encodeState(tempo: number, tracks: Track[], darkMode: boolean) {
   return `#${pieces.join(";")}`;
 }
 
-function parseState(hash: string): { tempo: number; tracks: Track[]; darkMode: boolean } | null {
+function parseState(
+  hash: string
+): { tempo: number; tracks: Track[]; darkMode: boolean } | null {
   const raw = hash.startsWith("#") ? hash.slice(1) : hash;
-  if (!raw) return { tempo: DEFAULT_TEMPO, tracks: DEFAULT_TRACKS, darkMode: true };
+  if (!raw)
+    return { tempo: DEFAULT_TEMPO, tracks: DEFAULT_TRACKS, darkMode: true };
 
   const parts = raw.split(";");
   let tempo = DEFAULT_TEMPO;
@@ -162,7 +174,9 @@ function parseState(hash: string): { tempo: number; tracks: Track[]; darkMode: b
         if (!Number.isFinite(beatsPerCycle) || beatsPerCycle < 1) {
           return null;
         }
-        const volumePercent = volRaw ? Number(volRaw) : Math.round(DEFAULT_VOLUME * 100);
+        const volumePercent = volRaw
+          ? Number(volRaw)
+          : Math.round(DEFAULT_VOLUME * 100);
         const volume = Math.min(1, Math.max(0, volumePercent / 100));
         return {
           id: `track-${index + 1}`,
@@ -173,7 +187,7 @@ function parseState(hash: string): { tempo: number; tracks: Track[]; darkMode: b
           deafened: Boolean(deafFlag),
         } satisfies Track;
       })
-      .filter(Boolean) as Track[],
+      .filter(Boolean) as Track[]
   );
 
   if (trackPieces.length === 0) {
@@ -189,7 +203,9 @@ export default function Poly420() {
   const [darkMode, setDarkMode] = useState(initial?.darkMode ?? true);
   const [playing, setPlaying] = useState(false);
   const [tempo, setTempo] = useState(initial?.tempo ?? DEFAULT_TEMPO);
-  const [tracks, setTracks] = useState<Track[]>(applyPitchOrder(initial?.tracks ?? DEFAULT_TRACKS));
+  const [tracks, setTracks] = useState<Track[]>(
+    applyPitchOrder(initial?.tracks ?? DEFAULT_TRACKS)
+  );
   const [cycleProgress, setCycleProgress] = useState(0);
   const [snapBeats, setSnapBeats] = useState(false);
 
@@ -236,19 +252,24 @@ export default function Poly420() {
 
     const schedule = () => {
       const until = ctx.currentTime + scheduleAhead;
-      while (startTimeRef.current + nextCycleRef.current * cycleDuration < until) {
-        const cycleStart = startTimeRef.current + nextCycleRef.current * cycleDuration;
+      while (
+        startTimeRef.current + nextCycleRef.current * cycleDuration <
+        until
+      ) {
+        const cycleStart =
+          startTimeRef.current + nextCycleRef.current * cycleDuration;
         audibleTracks.forEach((track) => {
           const frequency = PITCHES[track.pitchIndex % PITCHES.length];
           for (let beat = 0; beat < track.beatsPerCycle; beat += 1) {
-            const beatMoment = cycleStart + (cycleDuration * beat) / track.beatsPerCycle;
+            const beatMoment =
+              cycleStart + (cycleDuration * beat) / track.beatsPerCycle;
             scheduleClick(
               ctx,
               beatMoment,
               frequency,
               beat === 0,
               track.beatsPerCycle,
-              track.volume,
+              track.volume
             );
           }
         });
@@ -275,7 +296,8 @@ export default function Poly420() {
       }
 
       const elapsed = Math.max(0, ctx.currentTime - startTimeRef.current);
-      const position = cycleDuration > 0 ? (elapsed % cycleDuration) / cycleDuration : 0;
+      const position =
+        cycleDuration > 0 ? (elapsed % cycleDuration) / cycleDuration : 0;
       setCycleProgress(position);
       frame = requestAnimationFrame(update);
     };
@@ -335,15 +357,19 @@ export default function Poly420() {
   };
 
   const removeTrack = (id: string) => {
-    setTracks((prev) => applyPitchOrder(prev.filter((track) => track.id !== id)));
+    setTracks((prev) =>
+      applyPitchOrder(prev.filter((track) => track.id !== id))
+    );
   };
 
   const updateTrackBeats = (id: string, beats: number) => {
     const safeBeats = Math.max(1, Math.round(beats));
     setTracks((prev) =>
       applyPitchOrder(
-        prev.map((track) => (track.id === id ? { ...track, beatsPerCycle: safeBeats } : track)),
-      ),
+        prev.map((track) =>
+          track.id === id ? { ...track, beatsPerCycle: safeBeats } : track
+        )
+      )
     );
   };
 
@@ -351,8 +377,10 @@ export default function Poly420() {
     const safeVolume = Math.min(1, Math.max(0, volume));
     setTracks((prev) =>
       applyPitchOrder(
-        prev.map((track) => (track.id === id ? { ...track, volume: safeVolume } : track)),
-      ),
+        prev.map((track) =>
+          track.id === id ? { ...track, volume: safeVolume } : track
+        )
+      )
     );
   };
 
@@ -360,9 +388,11 @@ export default function Poly420() {
     setTracks((prev) =>
       applyPitchOrder(
         prev.map((track) =>
-          track.id === id ? { ...track, muted: !track.muted, deafened: false } : track,
-        ),
-      ),
+          track.id === id
+            ? { ...track, muted: !track.muted, deafened: false }
+            : track
+        )
+      )
     );
   };
 
@@ -370,9 +400,11 @@ export default function Poly420() {
     setTracks((prev) =>
       applyPitchOrder(
         prev.map((track) =>
-          track.id === id ? { ...track, deafened: !track.deafened, muted: false } : track,
-        ),
-      ),
+          track.id === id
+            ? { ...track, deafened: !track.deafened, muted: false }
+            : track
+        )
+      )
     );
   };
 
@@ -402,8 +434,8 @@ export default function Poly420() {
                   id="tempo-input"
                   type="number"
                   min={1}
-                  max={240}
-                  inputMode="numeric"
+                  max={120}
+                  inputMode="decimal"
                   pattern="[0-9]*"
                   value={tempo}
                   onFocus={(event) => event.target.showPicker?.()}
@@ -412,7 +444,11 @@ export default function Poly420() {
               </div>
             </div>
             <div className="transport-side">
-              <button onClick={addTrack} className="ghost round" aria-label="Add track">
+              <button
+                onClick={addTrack}
+                className="ghost round"
+                aria-label="Add track"
+              >
                 <span className="add-icon" aria-hidden="true">
                   +
                 </span>
@@ -435,7 +471,10 @@ export default function Poly420() {
                   <div className="control-column">
                     <div className="control-row tight">
                       <div className="beat-control">
-                        <label className="sr-only" htmlFor={`${track.id}-beats`}>
+                        <label
+                          className="sr-only"
+                          htmlFor={`${track.id}-beats`}
+                        >
                           Cycle
                         </label>
                         <input
@@ -448,23 +487,35 @@ export default function Poly420() {
                           value={track.beatsPerCycle}
                           onFocus={(event) => event.target.showPicker?.()}
                           onChange={(event) =>
-                            updateTrackBeats(track.id, Number(event.target.value))
+                            updateTrackBeats(
+                              track.id,
+                              Number(event.target.value)
+                            )
                           }
                         />
                         <div className="beat-visualization" aria-hidden="true">
-                          {Array.from({ length: track.beatsPerCycle }).map((_, index) => {
-                            const fillAmount = Math.min(1, Math.max(0, beatProgress - index));
-                            const isActive = fillAmount > 0;
-                            const fillStyle = {
-                              ["--fill" as const]: fillAmount.toString(),
-                            } as CSSProperties;
-                            const segmentClassName = `beat-segment ${isActive ? "active" : ""} ${
-                              snapBeats ? "snap" : ""
-                            }`;
-                            return (
-                              <div key={index} className={segmentClassName} style={fillStyle} />
-                            );
-                          })}
+                          {Array.from({ length: track.beatsPerCycle }).map(
+                            (_, index) => {
+                              const fillAmount = Math.min(
+                                1,
+                                Math.max(0, beatProgress - index)
+                              );
+                              const isActive = fillAmount > 0;
+                              const fillStyle = {
+                                ["--fill" as const]: fillAmount.toString(),
+                              } as CSSProperties;
+                              const segmentClassName = `beat-segment ${
+                                isActive ? "active" : ""
+                              } ${snapBeats ? "snap" : ""}`;
+                              return (
+                                <div
+                                  key={index}
+                                  className={segmentClassName}
+                                  style={fillStyle}
+                                />
+                              );
+                            }
+                          )}
                         </div>
                       </div>
                       <button
@@ -485,7 +536,10 @@ export default function Poly420() {
                         {track.muted ? "🔇" : "🔈"}
                       </button>
                       <div className="slider-wrap">
-                        <label className="sr-only" htmlFor={`${track.id}-volume`}>
+                        <label
+                          className="sr-only"
+                          htmlFor={`${track.id}-volume`}
+                        >
                           Level
                         </label>
                         <input
@@ -496,7 +550,10 @@ export default function Poly420() {
                           step={0.01}
                           value={track.volume}
                           onChange={(event) =>
-                            updateTrackVolume(track.id, Number(event.target.value))
+                            updateTrackVolume(
+                              track.id,
+                              Number(event.target.value)
+                            )
                           }
                         />
                       </div>
