@@ -45,81 +45,6 @@ const clampTempo = (tempo: number) =>
   Math.min(240, Math.max(1, Math.round(tempo)));
 let trackCounter = DEFAULT_TRACKS.length + 1;
 
-// iOS Chrome (WKWebView) can report AudioContext "running" yet output nothing; piping a generated WAV
-// through an <audio> element uses the HTMLMediaElement audio path (the same one sites like Spotify use)
-// and is much more reliable on iOS than pure WebAudio.
-function makeWavDataUri({
-  freq,
-  durationSec,
-  sampleRate,
-  volume,
-  type,
-}: {
-  freq: number;
-  durationSec: number;
-  sampleRate: number;
-  volume: number;
-  type: "sine" | "square";
-}) {
-  const n = Math.max(1, Math.floor(sampleRate * durationSec));
-  const pcm = new Int16Array(n);
-
-  const fadeN = Math.min(Math.floor(sampleRate * 0.006), Math.floor(n / 2));
-
-  for (let i = 0; i < n; i++) {
-    const t = i / sampleRate;
-    let amp = volume;
-
-    if (i < fadeN) amp *= i / fadeN;
-    else if (i > n - fadeN) amp *= (n - i) / fadeN;
-
-    const s =
-      type === "square"
-        ? Math.sin(2 * Math.PI * freq * t) >= 0
-          ? 1
-          : -1
-        : Math.sin(2 * Math.PI * freq * t);
-
-    const v = Math.max(-1, Math.min(1, s * amp));
-    pcm[i] = (v * 0x7fff) | 0;
-  }
-
-  const bytesPerSample = 2;
-  const blockAlign = 1 * bytesPerSample; // mono
-  const byteRate = sampleRate * blockAlign;
-  const dataSize = n * bytesPerSample;
-
-  const buffer = new ArrayBuffer(44 + dataSize);
-  const view = new DataView(buffer);
-
-  const writeStr = (off: number, s: string) => {
-    for (let i = 0; i < s.length; i++) view.setUint8(off + i, s.charCodeAt(i));
-  };
-
-  writeStr(0, "RIFF");
-  view.setUint32(4, 36 + dataSize, true);
-  writeStr(8, "WAVE");
-  writeStr(12, "fmt ");
-  view.setUint32(16, 16, true);
-  view.setUint16(20, 1, true); // PCM
-  view.setUint16(22, 1, true); // channels
-  view.setUint32(24, sampleRate, true);
-  view.setUint32(28, byteRate, true);
-  view.setUint16(32, blockAlign, true);
-  view.setUint16(34, 16, true);
-  writeStr(36, "data");
-  view.setUint32(40, dataSize, true);
-
-  let o = 44;
-  for (let i = 0; i < n; i++, o += 2) view.setInt16(o, pcm[i], true);
-
-  const u8 = new Uint8Array(buffer);
-  let bin = "";
-  for (let i = 0; i < u8.length; i++) bin += String.fromCharCode(u8[i]);
-  const b64 = btoa(bin);
-  return `data:audio/wav;base64,${b64}`;
-}
-
 function scheduleClick(
   ctx: AudioContext,
   time: number,
@@ -284,16 +209,11 @@ export default function Poly420() {
   );
   const [cycleProgress, setCycleProgress] = useState(0);
   const [snapBeats, setSnapBeats] = useState(false);
-  const [testToneActive, setTestToneActive] = useState(false);
 
   const audioContextRef = useRef<AudioContext | null>(null);
   const startTimeRef = useRef(0);
   const nextCycleRef = useRef(0);
   const prevCycleProgressRef = useRef(0);
-
-  // Test tone via <audio> (reliable on iOS Chrome/WKWebView)
-  const testAudioRef = useRef<HTMLAudioElement | null>(null);
-  const testToneStopTimerRef = useRef<number | null>(null);
 
   const ensureAudioRunning = useCallback(async () => {
     let ctx = audioContextRef.current;
@@ -312,6 +232,17 @@ export default function Poly420() {
     }
 
     return ctx;
+  }, []);
+
+  const resetAudioContext = useCallback(() => {
+    const existingContext = audioContextRef.current;
+    if (existingContext && existingContext.state !== "closed") {
+      existingContext.close().catch(() => {});
+    }
+
+    audioContextRef.current = null;
+    startTimeRef.current = 0;
+    nextCycleRef.current = 0;
   }, []);
 
   const cycleDuration = useMemo(() => 60 / tempo, [tempo]);
@@ -388,10 +319,9 @@ export default function Poly420() {
       if (interval !== null) {
         window.clearInterval(interval);
       }
-      startTimeRef.current = 0;
-      nextCycleRef.current = 0;
+      resetAudioContext();
     };
-  }, [playing, cycleDuration, audibleTracks, ensureAudioRunning]);
+  }, [playing, cycleDuration, audibleTracks, ensureAudioRunning, resetAudioContext]);
 
   useEffect(() => {
     let frame: number | null = null;
@@ -445,6 +375,7 @@ export default function Poly420() {
 
     if (playing) {
       setPlaying(false);
+      resetAudioContext();
       return;
     }
 
@@ -458,85 +389,9 @@ export default function Poly420() {
     setPlaying(true);
   };
 
-  const stopTestTone = useCallback((immediate = false) => {
-    if (testToneStopTimerRef.current !== null) {
-      window.clearTimeout(testToneStopTimerRef.current);
-      testToneStopTimerRef.current = null;
-    }
-
-    const el = testAudioRef.current;
-    if (!el) return;
-
-    try {
-      if (immediate) {
-        el.pause();
-        el.currentTime = 0;
-      } else {
-        // quick fade-out by swapping to a quieter tail
-        const quietTail = makeWavDataUri({
-          freq: 440,
-          durationSec: 0.08,
-          sampleRate: 44100,
-          volume: 0.08,
-          type: "sine",
-        });
-        el.src = quietTail;
-        void el.play().catch(() => {});
-        testToneStopTimerRef.current = window.setTimeout(() => {
-          el.pause();
-          try {
-            el.currentTime = 0;
-          } catch {}
-          testToneStopTimerRef.current = null;
-        }, 90);
-      }
-    } catch {
-      // ignore
-    }
-
-    setTestToneActive(false);
-  }, []);
-
-  const toggleTestTone = useCallback(async () => {
-    if (testToneActive) {
-      stopTestTone();
-      return;
-    }
-
-    // Keep WebAudio ready for the actual sequencer, but play the test tone via <audio>.
-    await ensureAudioRunning();
-
-    const el = testAudioRef.current;
-    if (!el) return;
-
-    const beep = makeWavDataUri({
-      freq: 440,
-      durationSec: 999, // long loop-ish tone; we'll stop it manually
-      sampleRate: 44100,
-      volume: 0.22,
-      type: "sine",
-    });
-
-    el.src = beep;
-    el.loop = true;
-    el.playsInline = true;
-
-    try {
-      await el.play();
-      setTestToneActive(true);
-    } catch (e) {
-      console.log("[poly420] <audio> test tone play failed:", e);
-      setTestToneActive(false);
-    }
-  }, [ensureAudioRunning, stopTestTone, testToneActive]);
-
   const updateTempo = (next: number) => {
     setTempo(clampTempo(next));
   };
-
-  useEffect(() => {
-    return () => stopTestTone(true);
-  }, [stopTestTone]);
 
   const addTrack = () => {
     const pitchIndex = tracks.length % PITCHES.length;
@@ -605,9 +460,6 @@ export default function Poly420() {
 
   return (
     <div className={`poly420-shell ${darkMode ? "dark" : ""}`}>
-      {/* Hidden <audio> used for iOS-reliable test tone playback */}
-      <audio ref={testAudioRef} preload="auto" />
-
       <div className="page">
         <div className="top-row">
           <div className="hero">
@@ -644,14 +496,6 @@ export default function Poly420() {
             </div>
 
             <div className="transport-side">
-              <button
-                onClick={toggleTestTone}
-                className={`ghost big ${testToneActive ? "active" : ""}`}
-                aria-label="Toggle test tone"
-              >
-                {testToneActive ? "Stop test tone" : "Test tone"}
-              </button>
-
               <button
                 onClick={addTrack}
                 className="ghost round"
