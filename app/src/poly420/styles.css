@@ -326,6 +326,10 @@ input[type="range"] {
   transform: translateY(-1px);
 }
 
+.ghost.active {
+  box-shadow: inset 0 0 0 2px var(--accent);
+}
+
 .ghost.big {
   padding: 10px 14px;
   font-size: 1.05rem;
@@ -386,9 +390,9 @@ body.poly420-dark .ghost.round {
   }
 
   .transport {
-    flex-wrap: nowrap;
-    justify-content: space-between;
-    gap: 8px;
+    flex-wrap: wrap;
+    justify-content: center;
+    gap: 10px;
   }
 
   .play-toggle {
@@ -410,5 +414,7 @@ body.poly420-dark .ghost.round {
 
   .transport-side {
     gap: 8px;
+    flex-wrap: wrap;
+    justify-content: center;
   }
 }

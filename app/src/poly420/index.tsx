@@ -209,11 +209,15 @@ export default function Poly420() {
   );
   const [cycleProgress, setCycleProgress] = useState(0);
   const [snapBeats, setSnapBeats] = useState(false);
+  const [testToneActive, setTestToneActive] = useState(false);
 
   const audioContextRef = useRef<AudioContext | null>(null);
   const startTimeRef = useRef(0);
   const nextCycleRef = useRef(0);
   const prevCycleProgressRef = useRef(0);
+  const testOscRef = useRef<OscillatorNode | null>(null);
+  const testGainRef = useRef<GainNode | null>(null);
+  const testToneFlagRef = useRef(false);
 
   const ensureAudioRunning = useCallback(async () => {
     let ctx = audioContextRef.current;
@@ -230,8 +234,8 @@ export default function Poly420() {
     const unlockSource = ctx.createBufferSource();
     unlockSource.buffer = unlockBuffer;
     unlockSource.connect(ctx.destination);
-    unlockSource.start(0);
-    unlockSource.stop(0);
+    unlockSource.start();
+    unlockSource.stop(ctx.currentTime + 0.01);
 
     return ctx;
   }, []);
@@ -249,6 +253,25 @@ export default function Poly420() {
     const base = `${window.location.pathname}${window.location.search}`;
     window.history.replaceState(null, "", `${base}${hash}`);
   }, [tempo, tracks, darkMode]);
+
+  useEffect(() => {
+    const attemptUnlock = () => {
+      void ensureAudioRunning();
+      window.removeEventListener("touchstart", attemptUnlock);
+      window.removeEventListener("pointerdown", attemptUnlock);
+      window.removeEventListener("keydown", attemptUnlock);
+    };
+
+    window.addEventListener("touchstart", attemptUnlock, { passive: true });
+    window.addEventListener("pointerdown", attemptUnlock, { passive: true });
+    window.addEventListener("keydown", attemptUnlock);
+
+    return () => {
+      window.removeEventListener("touchstart", attemptUnlock);
+      window.removeEventListener("pointerdown", attemptUnlock);
+      window.removeEventListener("keydown", attemptUnlock);
+    };
+  }, [ensureAudioRunning]);
 
   useEffect(() => {
     document.body.classList.toggle("poly420-dark", darkMode);
@@ -313,10 +336,9 @@ export default function Poly420() {
       startTimeRef.current = 0;
       nextCycleRef.current = 0;
       const ctx = audioContextRef.current;
-      if (ctx && ctx.state !== "closed") {
-        void ctx.close();
+      if (ctx && ctx.state === "running" && !testToneFlagRef.current) {
+        void ctx.suspend();
       }
-      audioContextRef.current = null;
     };
   }, [playing, cycleDuration, audibleTracks, ensureAudioRunning]);
 
@@ -386,9 +408,67 @@ export default function Poly420() {
     setPlaying(true);
   };
 
+  const stopTestTone = useCallback((immediate = false) => {
+    const osc = testOscRef.current;
+    const gain = testGainRef.current;
+    const ctx = osc?.context ?? gain?.context ?? audioContextRef.current;
+
+    if (!osc || !gain || !ctx) return;
+
+    const now = ctx.currentTime;
+    const endTime = immediate ? now : now + 0.12;
+    gain.gain.cancelScheduledValues(now);
+    gain.gain.setValueAtTime(gain.gain.value, now);
+    gain.gain.exponentialRampToValueAtTime(0.0001, endTime);
+    osc.stop(endTime + 0.02);
+
+    testOscRef.current = null;
+    testGainRef.current = null;
+    testToneFlagRef.current = false;
+    setTestToneActive(false);
+  }, []);
+
+  const toggleTestTone = useCallback(async () => {
+    if (testToneFlagRef.current) {
+      stopTestTone();
+      return;
+    }
+
+    const ctx = await ensureAudioRunning();
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+
+    gain.gain.setValueAtTime(0.0001, ctx.currentTime);
+    gain.gain.exponentialRampToValueAtTime(0.14, ctx.currentTime + 0.08);
+
+    osc.type = "sine";
+    osc.frequency.setValueAtTime(440, ctx.currentTime);
+    osc.connect(gain);
+    gain.connect(ctx.destination);
+    osc.start();
+
+    osc.onended = () => {
+      if (testOscRef.current === osc) {
+        testOscRef.current = null;
+        testGainRef.current = null;
+        testToneFlagRef.current = false;
+        setTestToneActive(false);
+      }
+    };
+
+    testOscRef.current = osc;
+    testGainRef.current = gain;
+    testToneFlagRef.current = true;
+    setTestToneActive(true);
+  }, [ensureAudioRunning, stopTestTone]);
+
   const updateTempo = (next: number) => {
     setTempo(clampTempo(next));
   };
+
+  useEffect(() => {
+    return () => stopTestTone(true);
+  }, [stopTestTone]);
 
   const addTrack = () => {
     const pitchIndex = tracks.length % PITCHES.length;
@@ -491,6 +571,13 @@ export default function Poly420() {
               </div>
             </div>
             <div className="transport-side">
+              <button
+                onClick={toggleTestTone}
+                className={`ghost big ${testToneActive ? "active" : ""}`}
+                aria-label="Toggle test tone"
+              >
+                {testToneActive ? "Stop test tone" : "Test tone"}
+              </button>
               <button
                 onClick={addTrack}
                 className="ghost round"
