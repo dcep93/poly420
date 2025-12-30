@@ -76,8 +76,8 @@ function applyPitchOrder(tracks: Track[]) {
 function encodeState(tempo: number, tracks: Track[], darkMode: boolean) {
   const pieces: string[] = [];
 
-  if (darkMode) {
-    pieces.push("theme=dark");
+  if (!darkMode) {
+    pieces.push("theme=light");
   }
 
   if (tempo !== DEFAULT_TEMPO) {
@@ -107,18 +107,23 @@ function encodeState(tempo: number, tracks: Track[], darkMode: boolean) {
 
 function parseState(hash: string): { tempo: number; tracks: Track[]; darkMode: boolean } | null {
   const raw = hash.startsWith("#") ? hash.slice(1) : hash;
-  if (!raw) return { tempo: DEFAULT_TEMPO, tracks: DEFAULT_TRACKS, darkMode: false };
+  if (!raw) return { tempo: DEFAULT_TEMPO, tracks: DEFAULT_TRACKS, darkMode: true };
 
   const parts = raw.split(";");
   let tempo = DEFAULT_TEMPO;
   let tracksPart: string | null = null;
-  let darkMode = false;
+  let darkMode = true;
 
   parts.forEach((part) => {
     if (part.startsWith("t=")) {
       tempo = clampTempo(Number(part.slice(2)) || DEFAULT_TEMPO);
     } else if (part.startsWith("theme=")) {
-      darkMode = part.slice("theme=".length) === "dark";
+      const themeValue = part.slice("theme=".length);
+      if (themeValue === "dark") {
+        darkMode = true;
+      } else if (themeValue === "light") {
+        darkMode = false;
+      }
     } else if (part.startsWith("tracks=")) {
       tracksPart = part.slice("tracks=".length);
     }
@@ -166,7 +171,7 @@ function parseState(hash: string): { tempo: number; tracks: Track[]; darkMode: b
 
 export default function Poly420() {
   const initial = parseState(window.location.hash);
-  const [darkMode, setDarkMode] = useState(initial?.darkMode ?? false);
+  const [darkMode, setDarkMode] = useState(initial?.darkMode ?? true);
   const [playing, setPlaying] = useState(false);
   const [tempo, setTempo] = useState(initial?.tempo ?? DEFAULT_TEMPO);
   const [tracks, setTracks] = useState<Track[]>(applyPitchOrder(initial?.tracks ?? DEFAULT_TRACKS));
@@ -317,102 +322,123 @@ export default function Poly420() {
 
   return (
     <div className={`poly420-shell ${darkMode ? "dark" : ""}`}>
-      <div className="poly420-header">
-        <h1>Poly420 ✨</h1>
-        <div className="header-actions">
-          <button className="ghost tiny" onClick={() => setDarkMode((prev) => !prev)} aria-label="Toggle theme">
-            {darkMode ? "🌙" : "🌞"}
-          </button>
-          <div className="version">#{recorded_sha}</div>
-        </div>
-      </div>
-
-      <div className="transport">
-        <button className="ghost big" onClick={togglePlay} aria-label="Play or stop">
-          {playing ? "⏹️" : "▶️"}
-        </button>
-        <div className="tempo">
-          <span className="tempo-label">⏱️</span>
-          <div className="tempo-row">
-            <button aria-label="Slow down" onClick={() => updateTempo(tempo - 1)} className="ghost square">
-              –
-            </button>
-            <input
-              id="tempo-input"
-              type="number"
-              min={1}
-              max={240}
-              value={tempo}
-              onChange={(event) => updateTempo(Number(event.target.value))}
-            />
-            <button aria-label="Speed up" onClick={() => updateTempo(tempo + 1)} className="ghost square">
-              +
-            </button>
+      <div className="page">
+        <div className="top-row">
+          <div className="hero">
+            <h1 title={`#${recorded_sha}`}>🥁 Poly420 🥁</h1>
           </div>
         </div>
-      </div>
 
-      <div className="tracks">
-        {tracks.map((track) => {
-          const beatProgress = cycleProgress * track.beatsPerCycle;
-          return (
-            <div key={track.id} className="track-card">
-              <div className="control-column">
-                <div className="control-row tight">
-                  <div className="beat-control">
-                    <input
-                      type="number"
-                      min={1}
-                      max={64}
-                      value={track.beatsPerCycle}
-                      onChange={(event) => updateTrackBeats(track.id, Number(event.target.value))}
-                    />
-                    <div className="beat-visualization" aria-hidden="true">
-                      {Array.from({ length: track.beatsPerCycle }).map((_, index) => {
-                        const fillAmount = Math.min(1, Math.max(0, beatProgress - index));
-                        const isActive = fillAmount > 0;
-                        const fillStyle = { ["--fill" as const]: fillAmount.toString() } as CSSProperties;
-                        return (
-                          <div
-                            key={index}
-                            className={`beat-segment ${isActive ? "active" : ""}`}
-                            style={fillStyle}
-                          />
-                        );
-                      })}
-                    </div>
-                  </div>
-                  <button className="chip danger" onClick={() => removeTrack(track.id)} aria-label="Remove">
-                    🗑️
-                  </button>
-                </div>
-
-                <div className="control-row">
-                  <button className={`chip ${track.muted ? "active" : ""}`} onClick={() => toggleMute(track.id)}>
-                    {track.muted ? "🔇" : "🔈"}
-                  </button>
-                  <input
-                    type="range"
-                    min={0}
-                    max={1}
-                    step={0.01}
-                    value={track.volume}
-                    onChange={(event) => updateTrackVolume(track.id, Number(event.target.value))}
-                  />
-                  <button className={`chip ${track.deafened ? "active" : ""}`} onClick={() => toggleDeafen(track.id)}>
-                    📣
-                  </button>
-                </div>
+        <div className="surface">
+          <div className="transport">
+            <button className={`play-toggle ${playing ? "active" : ""}`} onClick={togglePlay} aria-label="Play or stop">
+              <span className="play-icon" aria-hidden="true">
+                {playing ? "⏹" : "▶"}
+              </span>
+            </button>
+            <div className="tempo" aria-label="Tempo">
+              <div className="tempo-row">
+                <button aria-label="Slow down" onClick={() => updateTempo(tempo - 1)} className="ghost square">
+                  –
+                </button>
+                <input
+                  id="tempo-input"
+                  type="number"
+                  min={1}
+                  max={240}
+                  value={tempo}
+                  onChange={(event) => updateTempo(Number(event.target.value))}
+                />
+                <button aria-label="Speed up" onClick={() => updateTempo(tempo + 1)} className="ghost square">
+                  +
+                </button>
               </div>
             </div>
-          );
-        })}
-      </div>
+            <div className="transport-side">
+              <button onClick={addTrack} className="ghost round" aria-label="Add track">
+                ➕
+              </button>
+              <button className="icon-button" onClick={() => setDarkMode((prev) => !prev)} aria-label="Toggle theme">
+                {darkMode ? "🌙" : "🌞"}
+              </button>
+            </div>
+          </div>
 
-      <div className="add-row">
-        <button onClick={addTrack} className="ghost round" aria-label="Add">
-          ➕
-        </button>
+          <div className="tracks">
+            {tracks.map((track) => {
+              const beatProgress = cycleProgress * track.beatsPerCycle;
+              return (
+                <div key={track.id} className="track-card">
+                  <div className="control-column">
+                    <div className="control-row tight">
+                      <div className="beat-control">
+                        <label className="sr-only" htmlFor={`${track.id}-beats`}>
+                          Cycle
+                        </label>
+                        <input
+                          id={`${track.id}-beats`}
+                          type="number"
+                          min={1}
+                          max={64}
+                          value={track.beatsPerCycle}
+                          onChange={(event) => updateTrackBeats(track.id, Number(event.target.value))}
+                        />
+                        <div className="beat-visualization" aria-hidden="true">
+                          {Array.from({ length: track.beatsPerCycle }).map((_, index) => {
+                            const fillAmount = Math.min(1, Math.max(0, beatProgress - index));
+                            const isActive = fillAmount > 0;
+                            const fillStyle = { ["--fill" as const]: fillAmount.toString() } as CSSProperties;
+                            return (
+                              <div
+                                key={index}
+                                className={`beat-segment ${isActive ? "active" : ""}`}
+                                style={fillStyle}
+                              />
+                            );
+                          })}
+                        </div>
+                      </div>
+                      <button className="chip danger" onClick={() => removeTrack(track.id)} aria-label="Remove track">
+                        🗑️
+                      </button>
+                    </div>
+
+                    <div className="control-row">
+                      <button
+                        className={`chip ${track.muted ? "active" : ""}`}
+                        onClick={() => toggleMute(track.id)}
+                        aria-label={track.muted ? "Unmute" : "Mute"}
+                      >
+                        {track.muted ? "🔇" : "🔈"}
+                      </button>
+                      <div className="slider-wrap">
+                        <label className="sr-only" htmlFor={`${track.id}-volume`}>
+                          Level
+                        </label>
+                        <input
+                          id={`${track.id}-volume`}
+                          type="range"
+                          min={0}
+                          max={1}
+                          step={0.01}
+                          value={track.volume}
+                          onChange={(event) => updateTrackVolume(track.id, Number(event.target.value))}
+                        />
+                      </div>
+                      <button
+                        className={`chip ${track.deafened ? "active" : ""}`}
+                        onClick={() => toggleDeafen(track.id)}
+                        aria-label={track.deafened ? "Unfocus" : "Focus"}
+                      >
+                        📣
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
       </div>
     </div>
   );
