@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { type CSSProperties, useEffect, useMemo, useRef, useState } from "react";
 import recorded_sha from "./recorded_sha";
 import "./styles.css";
 
@@ -170,6 +170,7 @@ export default function Poly420() {
   const [playing, setPlaying] = useState(false);
   const [tempo, setTempo] = useState(initial?.tempo ?? DEFAULT_TEMPO);
   const [tracks, setTracks] = useState<Track[]>(applyPitchOrder(initial?.tracks ?? DEFAULT_TRACKS));
+  const [cycleProgress, setCycleProgress] = useState(0);
 
   const audioContextRef = useRef<AudioContext | null>(null);
   const startTimeRef = useRef(0);
@@ -233,6 +234,35 @@ export default function Poly420() {
       audioContextRef.current = null;
     };
   }, [playing, cycleDuration, audibleTracks]);
+
+  useEffect(() => {
+    let frame: number | null = null;
+
+    const update = () => {
+      const ctx = audioContextRef.current;
+      if (!ctx) {
+        setCycleProgress(0);
+        return;
+      }
+
+      const elapsed = Math.max(0, ctx.currentTime - startTimeRef.current);
+      const position = cycleDuration > 0 ? (elapsed % cycleDuration) / cycleDuration : 0;
+      setCycleProgress(position);
+      frame = requestAnimationFrame(update);
+    };
+
+    if (playing) {
+      frame = requestAnimationFrame(update);
+    } else {
+      setCycleProgress(0);
+    }
+
+    return () => {
+      if (frame !== null) {
+        cancelAnimationFrame(frame);
+      }
+    };
+  }, [playing, cycleDuration]);
 
   const togglePlay = () => {
     if (audioContextRef.current) {
@@ -324,17 +354,34 @@ export default function Poly420() {
 
       <div className="tracks">
         {tracks.map((track) => {
+          const beatProgress = cycleProgress * track.beatsPerCycle;
           return (
             <div key={track.id} className="track-card">
               <div className="control-column">
                 <div className="control-row tight">
-                  <input
-                    type="number"
-                    min={1}
-                    max={64}
-                    value={track.beatsPerCycle}
-                    onChange={(event) => updateTrackBeats(track.id, Number(event.target.value))}
-                  />
+                  <div className="beat-control">
+                    <input
+                      type="number"
+                      min={1}
+                      max={64}
+                      value={track.beatsPerCycle}
+                      onChange={(event) => updateTrackBeats(track.id, Number(event.target.value))}
+                    />
+                    <div className="beat-visualization" aria-hidden="true">
+                      {Array.from({ length: track.beatsPerCycle }).map((_, index) => {
+                        const fillAmount = Math.min(1, Math.max(0, beatProgress - index));
+                        const isActive = fillAmount > 0;
+                        const fillStyle = { ["--fill" as const]: fillAmount.toString() } as CSSProperties;
+                        return (
+                          <div
+                            key={index}
+                            className={`beat-segment ${isActive ? "active" : ""}`}
+                            style={fillStyle}
+                          />
+                        );
+                      })}
+                    </div>
+                  </div>
                   <button className="chip danger" onClick={() => removeTrack(track.id)} aria-label="Remove">
                     🗑️
                   </button>
