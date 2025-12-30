@@ -278,6 +278,11 @@ input[type="range"] {
 }
 
 .beat-segment {
+  --fill: clamp(
+    0,
+    calc(var(--cycle-progress, 0) * var(--beats, 1) - var(--index, 0)),
+    1
+  );
   position: relative;
   flex: 1;
   height: 12px;
@@ -295,16 +300,13 @@ input[type="range"] {
   background: var(--accent);
   transform-origin: left center;
   transform: scaleX(var(--fill));
-  opacity: 0.18;
+  opacity: calc(0.18 + 0.36 * var(--fill));
+  will-change: transform, opacity;
   transition: transform 0.08s linear, opacity 0.12s ease;
 }
 
 .beat-segment.snap::after {
   transition: none;
-}
-
-.beat-segment.active::after {
-  opacity: 0.52;
 }
 
 .ghost,

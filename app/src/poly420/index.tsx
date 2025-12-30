@@ -1,11 +1,4 @@
-import {
-  type CSSProperties,
-  useCallback,
-  useEffect,
-  useMemo,
-  useRef,
-  useState,
-} from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import recorded_sha from "./recorded_sha";
 import "./styles.css";
 
@@ -291,7 +284,6 @@ export default function Poly420() {
   const [tracks, setTracks] = useState<Track[]>(
     applyPitchOrder(initial?.tracks ?? DEFAULT_TRACKS)
   );
-  const [cycleProgress, setCycleProgress] = useState(0);
   const [snapBeats, setSnapBeats] = useState(false);
 
   const audioContextRef = useRef<AudioContext | null>(null);
@@ -302,12 +294,12 @@ export default function Poly420() {
   const nextCycleRef = useRef(0);
 
   const prevCycleProgressRef = useRef(0);
+  const lastCssProgressRef = useRef(-1);
 
   // <audio> pool ONLY for priming iOS Chrome media stack
   type PoolAudio = HTMLAudioElement & { __poly420SampleKey?: string };
 
   const audioPoolRef = useRef<PoolAudio[]>([]);
-  const audioPoolIxRef = useRef(0);
   const samplesRef = useRef<Map<string, string>>(new Map());
   const didPrimeMediaRef = useRef(false);
 
@@ -321,6 +313,16 @@ export default function Poly420() {
     const base = focused.length > 0 ? focused : tracks;
     return base.filter((track) => !track.muted);
   }, [tracks]);
+
+  const setCycleProgressCss = useCallback((value: number) => {
+    const clamped = Math.max(0, Math.min(1, value));
+    if (Math.abs(clamped - lastCssProgressRef.current) < 0.0004) return;
+    document.documentElement.style.setProperty(
+      "--cycle-progress",
+      clamped.toString()
+    );
+    lastCssProgressRef.current = clamped;
+  }, []);
 
   const ensureAudioRunning = useCallback(async () => {
     let ctx = audioContextRef.current;
@@ -510,14 +512,14 @@ export default function Poly420() {
 
     const update = () => {
       if (!playing) {
-        setCycleProgress(0);
+        setCycleProgressCss(0);
         frame = null;
         return;
       }
 
       const ctx = audioContextRef.current;
       if (!ctx) {
-        setCycleProgress(0);
+        setCycleProgressCss(0);
         frame = requestAnimationFrame(update);
         return;
       }
@@ -525,25 +527,26 @@ export default function Poly420() {
       const elapsed = Math.max(0, ctx.currentTime - startTimeRef.current);
       const position =
         cycleDuration > 0 ? (elapsed % cycleDuration) / cycleDuration : 0;
-      setCycleProgress(position);
+      setCycleProgressCss(position);
       frame = requestAnimationFrame(update);
     };
 
     if (playing) {
       frame = requestAnimationFrame(update);
     } else {
-      setCycleProgress(0);
+      setCycleProgressCss(0);
     }
 
     return () => {
       if (frame !== null) cancelAnimationFrame(frame);
     };
-  }, [playing, cycleDuration]);
+  }, [playing, cycleDuration, setCycleProgressCss]);
 
   useEffect(() => {
     const prev = prevCycleProgressRef.current;
-    const wrapped = playing && cycleProgress < prev;
-    prevCycleProgressRef.current = cycleProgress;
+    const current = lastCssProgressRef.current;
+    const wrapped = playing && current < prev;
+    prevCycleProgressRef.current = current;
 
     if (wrapped) {
       setSnapBeats(true);
@@ -552,7 +555,7 @@ export default function Poly420() {
     }
 
     if (!playing) setSnapBeats(false);
-  }, [cycleProgress, playing]);
+  }, [playing]);
 
   const togglePlay = async () => {
     if (playing) {
@@ -706,7 +709,6 @@ export default function Poly420() {
 
           <div className="tracks">
             {tracks.map((track) => {
-              const beatProgress = cycleProgress * track.beatsPerCycle;
               return (
                 <div key={track.id} className="track-card">
                   <div className="control-column">
@@ -736,26 +738,18 @@ export default function Poly420() {
                         />
                         <div className="beat-visualization" aria-hidden="true">
                           {Array.from({ length: track.beatsPerCycle }).map(
-                            (_, index) => {
-                              const fillAmount = Math.min(
-                                1,
-                                Math.max(0, beatProgress - index)
-                              );
-                              const isActive = fillAmount > 0;
-                              const fillStyle = {
-                                ["--fill" as const]: fillAmount.toString(),
-                              } as CSSProperties;
-                              const segmentClassName = `beat-segment ${
-                                isActive ? "active" : ""
-                              } ${snapBeats ? "snap" : ""}`;
-                              return (
-                                <div
-                                  key={index}
-                                  className={segmentClassName}
-                                  style={fillStyle}
-                                />
-                              );
-                            }
+                            (_, index) => (
+                              <div
+                                key={index}
+                                className={`beat-segment ${
+                                  snapBeats ? "snap" : ""
+                                }`}
+                                style={{
+                                  ["--index" as any]: index.toString(),
+                                  ["--beats" as any]: track.beatsPerCycle.toString(),
+                                }}
+                              />
+                            )
                           )}
                         </div>
                       </div>
