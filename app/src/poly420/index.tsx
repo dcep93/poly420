@@ -308,7 +308,9 @@ export default function Poly420() {
   const prevCycleProgressRef = useRef(0);
 
   // <audio> pool for iOS Chrome click playback
-  const audioPoolRef = useRef<HTMLAudioElement[]>([]);
+  type PoolAudio = HTMLAudioElement & { __poly420SampleKey?: string };
+
+  const audioPoolRef = useRef<PoolAudio[]>([]);
   const audioPoolIxRef = useRef(0);
   const samplesRef = useRef<Map<string, string>>(new Map());
   const didPrimeMediaRef = useRef(false);
@@ -357,7 +359,7 @@ export default function Poly420() {
 
     // pool size: enough for overlapping clicks across tracks
     const POOL = 32;
-    const pool: HTMLAudioElement[] = [];
+    const pool: PoolAudio[] = [];
     for (let i = 0; i < POOL; i++) {
       const a = new Audio();
       a.preload = "auto";
@@ -420,11 +422,18 @@ export default function Poly420() {
       const ix = audioPoolIxRef.current++ % pool.length;
       const a = pool[ix];
 
-      a.src = getSampleUri(freq, accent);
+      const key = `${freq}:${accent ? "a" : "n"}`;
+      if (a.__poly420SampleKey !== key) {
+        a.src = getSampleUri(freq, accent);
+        a.load();
+        a.__poly420SampleKey = key;
+      }
+
       // clamp + apply per-track volume
       a.volume = Math.min(1, Math.max(0, volume));
 
       try {
+        a.pause();
         a.currentTime = 0;
       } catch {}
 
