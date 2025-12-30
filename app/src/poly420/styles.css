@@ -114,6 +114,7 @@ body.poly420-dark {
   gap: 12px;
   align-items: center;
   justify-content: center;
+  width: 100%;
   flex-wrap: wrap;
 }
 
@@ -157,12 +158,14 @@ body.poly420-dark .play-toggle.active {
 
 .tempo {
   display: flex;
-  flex-direction: column;
+  flex-direction: row;
+  align-items: center;
   gap: 8px;
-  padding: 10px 12px;
-  border-radius: 14px;
-  border: 1px solid var(--border);
-  background: var(--ghost);
+  padding: 0;
+  border: none;
+  background: transparent;
+  flex: 1 1 160px;
+  min-width: 0;
 }
 
 .tempo-row {
@@ -185,6 +188,7 @@ body.poly420-dark .play-toggle.active {
   display: flex;
   gap: 10px;
   align-items: center;
+  flex-shrink: 0;
 }
 
 .tracks {
@@ -382,6 +386,29 @@ body.poly420-dark .ghost.round {
   }
 
   .transport {
-    flex-direction: column;
+    flex-wrap: nowrap;
+    justify-content: space-between;
+    gap: 8px;
+  }
+
+  .play-toggle {
+    width: 54px;
+    height: 54px;
+  }
+
+  .tempo {
+    padding: 0;
+    border: none;
+    background: transparent;
+    max-width: 220px;
+  }
+
+  .tempo input {
+    padding: 8px 9px;
+    font-size: 1rem;
+  }
+
+  .transport-side {
+    gap: 8px;
   }
 }
