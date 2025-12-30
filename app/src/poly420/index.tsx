@@ -16,8 +16,22 @@ const PITCHES = [392, 494, 587, 440, 659, 784, 523, 698];
 const DEFAULT_TEMPO = 30;
 const DEFAULT_VOLUME = 0.75;
 const DEFAULT_TRACKS: Track[] = [
-  { id: "track-1", beatsPerCycle: 4, volume: DEFAULT_VOLUME, muted: false, deafened: false, pitchIndex: 0 },
-  { id: "track-2", beatsPerCycle: 3, volume: DEFAULT_VOLUME, muted: false, deafened: false, pitchIndex: 1 },
+  {
+    id: "track-1",
+    beatsPerCycle: 4,
+    volume: DEFAULT_VOLUME,
+    muted: false,
+    deafened: false,
+    pitchIndex: 0,
+  },
+  {
+    id: "track-2",
+    beatsPerCycle: 3,
+    volume: DEFAULT_VOLUME,
+    muted: false,
+    deafened: false,
+    pitchIndex: 1,
+  },
 ];
 
 const clampTempo = (tempo: number) => Math.min(240, Math.max(1, Math.round(tempo)));
@@ -88,7 +102,8 @@ function encodeState(tempo: number, tracks: Track[], darkMode: boolean) {
     const trackStrings = tracks
       .map((track) => {
         const volumePercent = Math.round(track.volume * 100);
-        const volumeFlag = volumePercent !== Math.round(DEFAULT_VOLUME * 100) ? `v${volumePercent}` : "";
+        const volumeFlag =
+          volumePercent !== Math.round(DEFAULT_VOLUME * 100) ? `v${volumePercent}` : "";
         const muteFlag = track.muted ? "m" : "";
         const deafFlag = track.deafened ? "d" : "";
         return `${track.beatsPerCycle}${volumeFlag}${muteFlag}${deafFlag}`;
@@ -138,27 +153,27 @@ function parseState(hash: string): { tempo: number; tracks: Track[]; darkMode: b
 
   const trackPieces = applyPitchOrder(
     rawTracks
-    .split("|")
-    .map((piece: string, index: number) => {
-      const match = piece.match(/^(\d+)(v(\d+))?(m)?(d)?$/);
-      if (!match) return null;
-      const [, beats, , volRaw, muteFlag, deafFlag] = match;
-      const beatsPerCycle = Number(beats);
-      if (!Number.isFinite(beatsPerCycle) || beatsPerCycle < 1) {
-        return null;
-      }
-      const volumePercent = volRaw ? Number(volRaw) : Math.round(DEFAULT_VOLUME * 100);
-      const volume = Math.min(1, Math.max(0, volumePercent / 100));
-      return {
-        id: `track-${index + 1}`,
-        beatsPerCycle: Math.max(1, Math.round(beatsPerCycle)),
-        pitchIndex: index % PITCHES.length,
-        volume,
-        muted: Boolean(muteFlag),
-        deafened: Boolean(deafFlag),
-      } satisfies Track;
-    })
-    .filter(Boolean) as Track[],
+      .split("|")
+      .map((piece: string, index: number) => {
+        const match = piece.match(/^(\d+)(v(\d+))?(m)?(d)?$/);
+        if (!match) return null;
+        const [, beats, , volRaw, muteFlag, deafFlag] = match;
+        const beatsPerCycle = Number(beats);
+        if (!Number.isFinite(beatsPerCycle) || beatsPerCycle < 1) {
+          return null;
+        }
+        const volumePercent = volRaw ? Number(volRaw) : Math.round(DEFAULT_VOLUME * 100);
+        const volume = Math.min(1, Math.max(0, volumePercent / 100));
+        return {
+          id: `track-${index + 1}`,
+          beatsPerCycle: Math.max(1, Math.round(beatsPerCycle)),
+          pitchIndex: index % PITCHES.length,
+          volume,
+          muted: Boolean(muteFlag),
+          deafened: Boolean(deafFlag),
+        } satisfies Track;
+      })
+      .filter(Boolean) as Track[],
   );
 
   if (trackPieces.length === 0) {
@@ -227,7 +242,14 @@ export default function Poly420() {
           const frequency = PITCHES[track.pitchIndex % PITCHES.length];
           for (let beat = 0; beat < track.beatsPerCycle; beat += 1) {
             const beatMoment = cycleStart + (cycleDuration * beat) / track.beatsPerCycle;
-            scheduleClick(ctx, beatMoment, frequency, beat === 0, track.beatsPerCycle, track.volume);
+            scheduleClick(
+              ctx,
+              beatMoment,
+              frequency,
+              beat === 0,
+              track.beatsPerCycle,
+              track.volume,
+            );
           }
         });
         nextCycleRef.current += 1;
@@ -318,23 +340,39 @@ export default function Poly420() {
 
   const updateTrackBeats = (id: string, beats: number) => {
     const safeBeats = Math.max(1, Math.round(beats));
-    setTracks((prev) => applyPitchOrder(prev.map((track) => (track.id === id ? { ...track, beatsPerCycle: safeBeats } : track))));
+    setTracks((prev) =>
+      applyPitchOrder(
+        prev.map((track) => (track.id === id ? { ...track, beatsPerCycle: safeBeats } : track)),
+      ),
+    );
   };
 
   const updateTrackVolume = (id: string, volume: number) => {
     const safeVolume = Math.min(1, Math.max(0, volume));
-    setTracks((prev) => applyPitchOrder(prev.map((track) => (track.id === id ? { ...track, volume: safeVolume } : track))));
+    setTracks((prev) =>
+      applyPitchOrder(
+        prev.map((track) => (track.id === id ? { ...track, volume: safeVolume } : track)),
+      ),
+    );
   };
 
   const toggleMute = (id: string) => {
     setTracks((prev) =>
-      applyPitchOrder(prev.map((track) => (track.id === id ? { ...track, muted: !track.muted, deafened: false } : track))),
+      applyPitchOrder(
+        prev.map((track) =>
+          track.id === id ? { ...track, muted: !track.muted, deafened: false } : track,
+        ),
+      ),
     );
   };
 
   const toggleDeafen = (id: string) => {
     setTracks((prev) =>
-      applyPitchOrder(prev.map((track) => (track.id === id ? { ...track, deafened: !track.deafened, muted: false } : track))),
+      applyPitchOrder(
+        prev.map((track) =>
+          track.id === id ? { ...track, deafened: !track.deafened, muted: false } : track,
+        ),
+      ),
     );
   };
 
@@ -348,33 +386,42 @@ export default function Poly420() {
         </div>
 
         <div className="surface">
-            <div className="transport">
-              <button className={`play-toggle ${playing ? "active" : ""}`} onClick={togglePlay} aria-label="Play or stop">
-                <span className="play-icon" aria-hidden="true">
-                  {playing ? "⏹" : "▶"}
-                </span>
-              </button>
-              <div className="tempo" aria-label="Tempo">
-                <div className="tempo-row">
-                  <input
-                    id="tempo-input"
-                    type="number"
-                    min={1}
-                    max={240}
-                    inputMode="numeric"
-                    pattern="[0-9]*"
-                    value={tempo}
-                    onChange={(event) => updateTempo(Number(event.target.value))}
-                  />
-                </div>
+          <div className="transport">
+            <button
+              className={`play-toggle ${playing ? "active" : ""}`}
+              onClick={togglePlay}
+              aria-label="Play or stop"
+            >
+              <span className="play-icon" aria-hidden="true">
+                {playing ? "⏹" : "▶"}
+              </span>
+            </button>
+            <div className="tempo" aria-label="Tempo">
+              <div className="tempo-row">
+                <input
+                  id="tempo-input"
+                  type="number"
+                  min={1}
+                  max={240}
+                  inputMode="numeric"
+                  pattern="[0-9]*"
+                  value={tempo}
+                  onFocus={(event) => event.target.showPicker?.()}
+                  onChange={(event) => updateTempo(Number(event.target.value))}
+                />
               </div>
-              <div className="transport-side">
-                <button onClick={addTrack} className="ghost round" aria-label="Add track">
-                  <span className="add-icon" aria-hidden="true">
+            </div>
+            <div className="transport-side">
+              <button onClick={addTrack} className="ghost round" aria-label="Add track">
+                <span className="add-icon" aria-hidden="true">
                   +
                 </span>
               </button>
-              <button className="icon-button" onClick={() => setDarkMode((prev) => !prev)} aria-label="Toggle theme">
+              <button
+                className="icon-button"
+                onClick={() => setDarkMode((prev) => !prev)}
+                aria-label="Toggle theme"
+              >
                 {darkMode ? "🌙" : "🌞"}
               </button>
             </div>
@@ -399,25 +446,32 @@ export default function Poly420() {
                           inputMode="numeric"
                           pattern="[0-9]*"
                           value={track.beatsPerCycle}
-                          onChange={(event) => updateTrackBeats(track.id, Number(event.target.value))}
+                          onFocus={(event) => event.target.showPicker?.()}
+                          onChange={(event) =>
+                            updateTrackBeats(track.id, Number(event.target.value))
+                          }
                         />
                         <div className="beat-visualization" aria-hidden="true">
                           {Array.from({ length: track.beatsPerCycle }).map((_, index) => {
                             const fillAmount = Math.min(1, Math.max(0, beatProgress - index));
                             const isActive = fillAmount > 0;
-                            const fillStyle = { ["--fill" as const]: fillAmount.toString() } as CSSProperties;
-                            const segmentClassName = `beat-segment ${isActive ? "active" : ""} ${snapBeats ? "snap" : ""}`;
+                            const fillStyle = {
+                              ["--fill" as const]: fillAmount.toString(),
+                            } as CSSProperties;
+                            const segmentClassName = `beat-segment ${isActive ? "active" : ""} ${
+                              snapBeats ? "snap" : ""
+                            }`;
                             return (
-                              <div
-                                key={index}
-                                className={segmentClassName}
-                                style={fillStyle}
-                              />
+                              <div key={index} className={segmentClassName} style={fillStyle} />
                             );
                           })}
                         </div>
                       </div>
-                      <button className="chip danger" onClick={() => removeTrack(track.id)} aria-label="Remove track">
+                      <button
+                        className="chip danger"
+                        onClick={() => removeTrack(track.id)}
+                        aria-label="Remove track"
+                      >
                         🗑️
                       </button>
                     </div>
@@ -441,7 +495,9 @@ export default function Poly420() {
                           max={1}
                           step={0.01}
                           value={track.volume}
-                          onChange={(event) => updateTrackVolume(track.id, Number(event.target.value))}
+                          onChange={(event) =>
+                            updateTrackVolume(track.id, Number(event.target.value))
+                          }
                         />
                       </div>
                       <button
