@@ -56,8 +56,7 @@ function isIOSChromeLikeWebView() {
 }
 
 // iOS Chrome (WKWebView) can report AudioContext "running" yet output nothing;
-// scheduling clicks via <audio> uses the HTMLMediaElement audio path (Spotify-style),
-// which is much more reliable in iOS Chrome than pure WebAudio.
+// we "prime" the HTMLMediaElement path inside a trusted gesture, then run WebAudio for precision.
 function makeWavDataUri({
   freq,
   durationSec,
@@ -296,18 +295,15 @@ export default function Poly420() {
   const [snapBeats, setSnapBeats] = useState(false);
 
   const audioContextRef = useRef<AudioContext | null>(null);
+  const keepAliveRef = useRef<OscillatorNode | null>(null);
 
   // WebAudio timing
   const startTimeRef = useRef(0);
   const nextCycleRef = useRef(0);
 
-  // HTMLMediaElement timing (iOS Chrome fallback)
-  const startPerfRef = useRef(0);
-  const nextCyclePerfRef = useRef(0);
-
   const prevCycleProgressRef = useRef(0);
 
-  // <audio> pool for iOS Chrome click playback
+  // <audio> pool ONLY for priming iOS Chrome media stack
   type PoolAudio = HTMLAudioElement & { __poly420SampleKey?: string };
 
   const audioPoolRef = useRef<PoolAudio[]>([]);
@@ -315,7 +311,8 @@ export default function Poly420() {
   const samplesRef = useRef<Map<string, string>>(new Map());
   const didPrimeMediaRef = useRef(false);
 
-  const useHtmlAudioEngine = useMemo(() => isIOSChromeLikeWebView(), []);
+  // Precision mode: ALWAYS use WebAudio scheduling/playback.
+  const useHtmlAudioEngine = false;
 
   const cycleDuration = useMemo(() => 60 / tempo, [tempo]);
 
@@ -333,7 +330,10 @@ export default function Poly420() {
         .webkitAudioContext;
 
     if (!ctx || ctx.state === "closed") {
-      ctx = new AudioCtor();
+      // latencyHint reduces buffering, helps responsiveness/precision feel
+      ctx = new AudioCtor({
+        latencyHint: "interactive",
+      } as AudioContextOptions);
       audioContextRef.current = ctx;
     }
 
@@ -341,11 +341,29 @@ export default function Poly420() {
       await ctx.resume().catch(() => {});
     }
 
+    // Keep the audio graph alive (some iOS/WKWebView cases behave better)
+    if (!keepAliveRef.current && ctx.state === "running") {
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      gain.gain.value = 0; // silent
+      osc.frequency.value = 30;
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      osc.start();
+      keepAliveRef.current = osc;
+    }
+
     return ctx;
   }, []);
 
   const resetAudioContext = useCallback(() => {
     const existingContext = audioContextRef.current;
+
+    try {
+      keepAliveRef.current?.stop();
+    } catch {}
+    keepAliveRef.current = null;
+
     if (existingContext && existingContext.state !== "closed") {
       existingContext.close().catch(() => {});
     }
@@ -357,8 +375,7 @@ export default function Poly420() {
   const ensureAudioPool = useCallback(() => {
     if (audioPoolRef.current.length > 0) return;
 
-    // pool size: enough for overlapping clicks across tracks
-    const POOL = 32;
+    const POOL = 8; // only needed for priming; keep it small
     const pool: PoolAudio[] = [];
     for (let i = 0; i < POOL; i++) {
       const a = new Audio();
@@ -374,10 +391,9 @@ export default function Poly420() {
     const hit = samplesRef.current.get(key);
     if (hit) return hit;
 
-    // Shorter for tighter rhythms. Accent uses square for punch.
     const uri = makeWavDataUri({
       freq,
-      durationSec: accent ? 0.085 : 0.06,
+      durationSec: accent ? 0.06 : 0.045, // short + snappy (only for priming)
       sampleRate: 44100,
       volume: accent ? 0.95 : 0.7,
       type: accent ? "square" : "sine",
@@ -391,8 +407,6 @@ export default function Poly420() {
     if (didPrimeMediaRef.current) return;
     ensureAudioPool();
 
-    // "Prime" the media stack on iOS by doing a real play() in the gesture.
-    // We use a tiny (inaudible) sample at volume 0 so later plays work reliably.
     const pool = audioPoolRef.current;
     const a = pool[0];
     a.src = getSampleUri(440, false);
@@ -409,40 +423,11 @@ export default function Poly420() {
       } catch {}
       didPrimeMediaRef.current = true;
     } catch {
-      // If even this fails, you're not in a trusted gesture; caller must be a click/tap handler.
+      // If even this fails, you're not in a trusted gesture.
     } finally {
       a.volume = 1;
     }
   }, [ensureAudioPool, getSampleUri]);
-
-  const playClickHtml = useCallback(
-    (freq: number, accent: boolean, volume: number) => {
-      ensureAudioPool();
-      const pool = audioPoolRef.current;
-      const ix = audioPoolIxRef.current++ % pool.length;
-      const a = pool[ix];
-
-      const key = `${freq}:${accent ? "a" : "n"}`;
-      if (a.__poly420SampleKey !== key) {
-        a.src = getSampleUri(freq, accent);
-        a.load();
-        a.__poly420SampleKey = key;
-      }
-
-      // clamp + apply per-track volume
-      a.volume = Math.min(1, Math.max(0, volume));
-
-      try {
-        a.pause();
-        a.currentTime = 0;
-      } catch {}
-
-      void a.play().catch(() => {
-        // if play fails, it's almost always "not in gesture" — the play button primes it
-      });
-    },
-    [ensureAudioPool, getSampleUri]
-  );
 
   useEffect(() => {
     const hash = encodeState(tempo, tracks, darkMode);
@@ -461,56 +446,7 @@ export default function Poly420() {
     const setup = async () => {
       if (!playing) return;
 
-      if (useHtmlAudioEngine) {
-        // HTML <audio> scheduler (iOS Chrome)
-        const startAt = performance.now() + 120; // give the pool a tiny head start
-        startPerfRef.current = startAt;
-        nextCyclePerfRef.current = 0;
-
-        const scheduleAheadMs = 700;
-
-        const schedule = () => {
-          const now = performance.now();
-          const until = now + scheduleAheadMs;
-
-          while (
-            startPerfRef.current +
-              nextCyclePerfRef.current * cycleDuration * 1000 <
-            until
-          ) {
-            const cycleStartMs =
-              startPerfRef.current +
-              nextCyclePerfRef.current * cycleDuration * 1000;
-
-            audibleTracks.forEach((track) => {
-              const frequency = PITCHES[track.pitchIndex % PITCHES.length];
-              for (let beat = 0; beat < track.beatsPerCycle; beat += 1) {
-                const beatMomentMs =
-                  cycleStartMs +
-                  (cycleDuration * 1000 * beat) / track.beatsPerCycle;
-
-                const delay = beatMomentMs - performance.now();
-                if (delay <= 0) {
-                  playClickHtml(frequency, beat === 0, track.volume);
-                } else {
-                  window.setTimeout(() => {
-                    if (!cancelled && playing) {
-                      playClickHtml(frequency, beat === 0, track.volume);
-                    }
-                  }, delay);
-                }
-              }
-            });
-
-            nextCyclePerfRef.current += 1;
-          }
-        };
-
-        interval = window.setInterval(schedule, 40);
-        return;
-      }
-
-      // WebAudio scheduler (desktop + iOS Safari generally)
+      // WebAudio scheduler (precision)
       const ctx =
         audioContextRef.current && audioContextRef.current.state !== "closed"
           ? audioContextRef.current
@@ -551,7 +487,7 @@ export default function Poly420() {
         }
       };
 
-      interval = window.setInterval(schedule, 40);
+      interval = window.setInterval(schedule, 25);
     };
 
     void setup();
@@ -559,12 +495,7 @@ export default function Poly420() {
     return () => {
       cancelled = true;
       if (interval !== null) window.clearInterval(interval);
-
-      // Only close WebAudio context for the WebAudio engine.
-      if (!useHtmlAudioEngine) resetAudioContext();
-
-      startPerfRef.current = 0;
-      nextCyclePerfRef.current = 0;
+      resetAudioContext();
     };
   }, [
     playing,
@@ -572,8 +503,6 @@ export default function Poly420() {
     audibleTracks,
     ensureAudioRunning,
     resetAudioContext,
-    useHtmlAudioEngine,
-    playClickHtml,
   ]);
 
   useEffect(() => {
@@ -583,17 +512,6 @@ export default function Poly420() {
       if (!playing) {
         setCycleProgress(0);
         frame = null;
-        return;
-      }
-
-      if (useHtmlAudioEngine) {
-        const elapsedMs = Math.max(0, performance.now() - startPerfRef.current);
-        const position =
-          cycleDuration > 0
-            ? ((elapsedMs / 1000) % cycleDuration) / cycleDuration
-            : 0;
-        setCycleProgress(position);
-        frame = requestAnimationFrame(update);
         return;
       }
 
@@ -620,7 +538,7 @@ export default function Poly420() {
     return () => {
       if (frame !== null) cancelAnimationFrame(frame);
     };
-  }, [playing, cycleDuration, useHtmlAudioEngine]);
+  }, [playing, cycleDuration]);
 
   useEffect(() => {
     const prev = prevCycleProgressRef.current;
@@ -639,15 +557,13 @@ export default function Poly420() {
   const togglePlay = async () => {
     if (playing) {
       setPlaying(false);
-      if (!useHtmlAudioEngine) resetAudioContext();
+      resetAudioContext();
       return;
     }
 
-    if (useHtmlAudioEngine) {
-      // MUST happen inside the tap gesture for iOS Chrome: primes HTMLMediaElement playback.
+    // Prime iOS Chrome-like WebViews inside the gesture, but still run WebAudio for precision.
+    if (isIOSChromeLikeWebView()) {
       await primeMediaOnce();
-      setPlaying(true);
-      return;
     }
 
     const existingContext = audioContextRef.current;
@@ -657,6 +573,7 @@ export default function Poly420() {
     console.log(
       `[poly420] Play tap resume state: ${beforeState} -> ${afterState}`
     );
+
     setPlaying(true);
   };
 
@@ -898,7 +815,6 @@ export default function Poly420() {
             })}
           </div>
 
-          {/* tiny debug hint without changing your CSS/layout much */}
           <div
             style={{
               opacity: 0.5,
@@ -907,10 +823,7 @@ export default function Poly420() {
               padding: "10px 2px",
             }}
           >
-            engine:{" "}
-            {useHtmlAudioEngine
-              ? "html-audio (iOS Chrome fallback)"
-              : "webaudio"}
+            engine: {useHtmlAudioEngine ? "html-audio" : "webaudio (precision)"}
           </div>
         </div>
       </div>
