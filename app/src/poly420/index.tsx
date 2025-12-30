@@ -356,7 +356,9 @@ export default function Poly420() {
             </div>
             <div className="transport-side">
               <button onClick={addTrack} className="ghost round" aria-label="Add track">
-                ➕
+                <span className="add-icon" aria-hidden="true">
+                  +
+                </span>
               </button>
               <button className="icon-button" onClick={() => setDarkMode((prev) => !prev)} aria-label="Toggle theme">
                 {darkMode ? "🌙" : "🌞"}

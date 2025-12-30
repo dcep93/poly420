@@ -349,6 +349,12 @@ input[type="range"] {
   background: var(--card);
 }
 
+.add-icon {
+  font-size: 1.35rem;
+  font-weight: 700;
+  line-height: 1;
+}
+
 body.poly420-dark .ghost.round {
   background: var(--card);
   color: #fff;
