@@ -361,7 +361,6 @@ export default function Poly420() {
                     type="number"
                     min={1}
                     max={240}
-                    inputMode="numeric"
                     value={tempo}
                     onChange={(event) => updateTempo(Number(event.target.value))}
                   />
@@ -395,7 +394,6 @@ export default function Poly420() {
                           type="number"
                           min={1}
                           max={64}
-                          inputMode="numeric"
                           value={track.beatsPerCycle}
                           onChange={(event) => updateTrackBeats(track.id, Number(event.target.value))}
                         />
