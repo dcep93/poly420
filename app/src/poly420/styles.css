@@ -166,11 +166,8 @@ body.poly420-dark .play-toggle.active {
 }
 
 .tempo-row {
-  display: grid;
-  grid-template-columns: auto 1fr auto;
-  gap: 8px;
-  align-items: center;
-  justify-items: center;
+  display: flex;
+  width: 100%;
 }
 
 .tempo input {

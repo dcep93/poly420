@@ -348,33 +348,28 @@ export default function Poly420() {
         </div>
 
         <div className="surface">
-          <div className="transport">
-            <button className={`play-toggle ${playing ? "active" : ""}`} onClick={togglePlay} aria-label="Play or stop">
-              <span className="play-icon" aria-hidden="true">
-                {playing ? "⏹" : "▶"}
-              </span>
-            </button>
-            <div className="tempo" aria-label="Tempo">
-              <div className="tempo-row">
-                <button aria-label="Slow down" onClick={() => updateTempo(tempo - 1)} className="ghost square">
-                  –
-                </button>
-                <input
-                  id="tempo-input"
-                  type="number"
-                  min={1}
-                  max={240}
-                  value={tempo}
-                  onChange={(event) => updateTempo(Number(event.target.value))}
-                />
-                <button aria-label="Speed up" onClick={() => updateTempo(tempo + 1)} className="ghost square">
-                  +
-                </button>
+            <div className="transport">
+              <button className={`play-toggle ${playing ? "active" : ""}`} onClick={togglePlay} aria-label="Play or stop">
+                <span className="play-icon" aria-hidden="true">
+                  {playing ? "⏹" : "▶"}
+                </span>
+              </button>
+              <div className="tempo" aria-label="Tempo">
+                <div className="tempo-row">
+                  <input
+                    id="tempo-input"
+                    type="number"
+                    min={1}
+                    max={240}
+                    inputMode="numeric"
+                    value={tempo}
+                    onChange={(event) => updateTempo(Number(event.target.value))}
+                  />
+                </div>
               </div>
-            </div>
-            <div className="transport-side">
-              <button onClick={addTrack} className="ghost round" aria-label="Add track">
-                <span className="add-icon" aria-hidden="true">
+              <div className="transport-side">
+                <button onClick={addTrack} className="ghost round" aria-label="Add track">
+                  <span className="add-icon" aria-hidden="true">
                   +
                 </span>
               </button>
@@ -400,6 +395,7 @@ export default function Poly420() {
                           type="number"
                           min={1}
                           max={64}
+                          inputMode="numeric"
                           value={track.beatsPerCycle}
                           onChange={(event) => updateTrackBeats(track.id, Number(event.target.value))}
                         />
