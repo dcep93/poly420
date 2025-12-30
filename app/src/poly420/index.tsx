@@ -293,8 +293,21 @@ export default function Poly420() {
   const startTimeRef = useRef(0);
   const nextCycleRef = useRef(0);
 
-  const prevCycleProgressRef = useRef(0);
   const lastCssProgressRef = useRef(-1);
+  const snapResetHandleRef = useRef<number | null>(null);
+  const playingRef = useRef(playing);
+
+  useEffect(() => {
+    playingRef.current = playing;
+  }, [playing]);
+
+  useEffect(() => {
+    return () => {
+      if (snapResetHandleRef.current !== null) {
+        cancelAnimationFrame(snapResetHandleRef.current);
+      }
+    };
+  }, []);
 
   // <audio> pool ONLY for priming iOS Chrome media stack
   type PoolAudio = HTMLAudioElement & { __poly420SampleKey?: string };
@@ -316,7 +329,21 @@ export default function Poly420() {
 
   const setCycleProgressCss = useCallback((value: number) => {
     const clamped = Math.max(0, Math.min(1, value));
-    if (Math.abs(clamped - lastCssProgressRef.current) < 0.0004) return;
+    const prev = lastCssProgressRef.current;
+    const wrapped = playingRef.current && clamped < prev;
+
+    if (wrapped) {
+      setSnapBeats(true);
+      if (snapResetHandleRef.current !== null) {
+        cancelAnimationFrame(snapResetHandleRef.current);
+      }
+      snapResetHandleRef.current = requestAnimationFrame(() => {
+        setSnapBeats(false);
+        snapResetHandleRef.current = null;
+      });
+    }
+
+    if (Math.abs(clamped - prev) < 0.0004) return;
     document.documentElement.style.setProperty(
       "--cycle-progress",
       clamped.toString()
@@ -541,21 +568,6 @@ export default function Poly420() {
       if (frame !== null) cancelAnimationFrame(frame);
     };
   }, [playing, cycleDuration, setCycleProgressCss]);
-
-  useEffect(() => {
-    const prev = prevCycleProgressRef.current;
-    const current = lastCssProgressRef.current;
-    const wrapped = playing && current < prev;
-    prevCycleProgressRef.current = current;
-
-    if (wrapped) {
-      setSnapBeats(true);
-      const handle = requestAnimationFrame(() => setSnapBeats(false));
-      return () => cancelAnimationFrame(handle);
-    }
-
-    if (!playing) setSnapBeats(false);
-  }, [playing]);
 
   const togglePlay = async () => {
     if (playing) {
