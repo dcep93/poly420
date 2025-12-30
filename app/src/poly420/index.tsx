@@ -176,10 +176,12 @@ export default function Poly420() {
   const [tempo, setTempo] = useState(initial?.tempo ?? DEFAULT_TEMPO);
   const [tracks, setTracks] = useState<Track[]>(applyPitchOrder(initial?.tracks ?? DEFAULT_TRACKS));
   const [cycleProgress, setCycleProgress] = useState(0);
+  const [snapBeats, setSnapBeats] = useState(false);
 
   const audioContextRef = useRef<AudioContext | null>(null);
   const startTimeRef = useRef(0);
   const nextCycleRef = useRef(0);
+  const prevCycleProgressRef = useRef(0);
 
   const cycleDuration = useMemo(() => 60 / tempo, [tempo]);
 
@@ -268,6 +270,22 @@ export default function Poly420() {
       }
     };
   }, [playing, cycleDuration]);
+
+  useEffect(() => {
+    const prev = prevCycleProgressRef.current;
+    const wrapped = playing && cycleProgress < prev;
+    prevCycleProgressRef.current = cycleProgress;
+
+    if (wrapped) {
+      setSnapBeats(true);
+      const handle = requestAnimationFrame(() => setSnapBeats(false));
+      return () => cancelAnimationFrame(handle);
+    }
+
+    if (!playing) {
+      setSnapBeats(false);
+    }
+  }, [cycleProgress, playing]);
 
   const togglePlay = () => {
     if (audioContextRef.current) {
@@ -390,10 +408,11 @@ export default function Poly420() {
                             const fillAmount = Math.min(1, Math.max(0, beatProgress - index));
                             const isActive = fillAmount > 0;
                             const fillStyle = { ["--fill" as const]: fillAmount.toString() } as CSSProperties;
+                            const segmentClassName = `beat-segment ${isActive ? "active" : ""} ${snapBeats ? "snap" : ""}`;
                             return (
                               <div
                                 key={index}
-                                className={`beat-segment ${isActive ? "active" : ""}`}
+                                className={segmentClassName}
                                 style={fillStyle}
                               />
                             );
