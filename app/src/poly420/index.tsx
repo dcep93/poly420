@@ -59,12 +59,12 @@ function makeWavDataUri({
   durationSec: number;
   sampleRate: number;
   volume: number;
-  type: "sine" | "square";
+  type: "sine" | "square" | "triangle";
 }) {
   const n = Math.max(1, Math.floor(sampleRate * durationSec));
   const pcm = new Int16Array(n);
 
-  const fadeN = Math.min(Math.floor(sampleRate * 0.006), Math.floor(n / 2));
+  const fadeN = Math.min(Math.floor(sampleRate * 0.0045), Math.floor(n / 2));
 
   for (let i = 0; i < n; i++) {
     const t = i / sampleRate;
@@ -131,19 +131,25 @@ function scheduleClickWebAudio(
   const osc = ctx.createOscillator();
   const gain = ctx.createGain();
 
-  const accentBoost = accent ? 0.35 : 0.15;
-  const smoothness = Math.tanh(0.6 + density * 0.1);
-  const peak = Math.min(0.6, (0.18 + accentBoost) * smoothness);
+  const accentBoost = accent ? 0.6 : 0.28;
+  const smoothness = Math.tanh(0.72 + density * 0.13);
+  const peak = Math.min(1.05, (0.32 + accentBoost) * smoothness);
 
   gain.gain.setValueAtTime(0, time);
-  gain.gain.linearRampToValueAtTime(0.002, time + 0.003);
-  gain.gain.linearRampToValueAtTime(peak, time + 0.02);
-  gain.gain.exponentialRampToValueAtTime(0.0001, time + 0.28);
+  gain.gain.linearRampToValueAtTime(0.004, time + 0.0025);
+  gain.gain.linearRampToValueAtTime(peak, time + 0.018);
+  gain.gain.exponentialRampToValueAtTime(0.00015, time + 0.3);
+
+  const filter = ctx.createBiquadFilter();
+  filter.type = "lowpass";
+  filter.frequency.setValueAtTime(accent ? 6400 : 5200, time);
+  filter.Q.setValueAtTime(0.0002, time);
 
   osc.frequency.setValueAtTime(frequency, time);
-  osc.type = accent ? "square" : "sine";
+  osc.type = accent ? "triangle" : "sine";
 
-  osc.connect(gain);
+  osc.connect(filter);
+  filter.connect(gain);
   gain.connect(trackGain ?? ctx.destination);
 
   osc.start(time);
@@ -286,6 +292,7 @@ export default function Poly420() {
 
   const audioContextRef = useRef<AudioContext | null>(null);
   const keepAliveRef = useRef<OscillatorNode | null>(null);
+  const transportAnchorRef = useRef<number | null>(null);
   const trackGainsRef = useRef<Map<string, GainNode>>(new Map());
 
   // Timing
@@ -335,6 +342,7 @@ export default function Poly420() {
   const audioPoolRef = useRef<PoolAudio[]>([]);
   const audioPoolIndexRef = useRef(0);
   const samplesRef = useRef<Map<string, string>>(new Map());
+  const poolPrimedRef = useRef(false);
   const pendingHtmlTimersRef = useRef<number[]>([]);
 
   const resetTrackGains = useCallback(() => {
@@ -557,6 +565,7 @@ export default function Poly420() {
     keepAliveRef.current = null;
 
     // Reset transport state immediately
+    transportAnchorRef.current = null;
     startTimeRef.current = 0;
     nextCycleRef.current = 0;
     scheduledUntilRef.current = 0;
@@ -587,27 +596,34 @@ export default function Poly420() {
     audioPoolRef.current = pool;
   }, []);
 
-  const getSampleUri = useCallback((freq: number, accent: boolean) => {
-    const key = `${freq}:${accent ? "a" : "n"}`;
-    const hit = samplesRef.current.get(key);
-    if (hit) return hit;
+  const getSampleUri = useCallback(
+    (freq: number, accent: boolean, loudness: number) => {
+      const boosted = Math.min(1.18, loudness * (accent ? 1.3 : 1.18) + 0.06);
+      const quantized = Math.max(1, Math.round(boosted * 100));
+      const key = `${freq}:${accent ? "a" : "n"}:${quantized}`;
+      const hit = samplesRef.current.get(key);
+      if (hit) return hit;
 
-    const uri = makeWavDataUri({
-      freq,
-      durationSec: accent ? 0.06 : 0.045,
-      sampleRate: 44100,
-      volume: accent ? 0.95 : 0.7,
-      type: accent ? "square" : "sine",
-    });
+      const uri = makeWavDataUri({
+        freq,
+        durationSec: accent ? 0.075 : 0.055,
+        sampleRate: 44100,
+        volume: boosted,
+        type: accent ? "triangle" : "sine",
+      });
 
-    samplesRef.current.set(key, uri);
-    return uri;
-  }, []);
+      samplesRef.current.set(key, uri);
+      return uri;
+    },
+    []
+  );
 
   const primeMediaPoolInGesture = useCallback(async () => {
     ensureAudioPool();
+    if (poolPrimedRef.current) return;
+    poolPrimedRef.current = true;
 
-    const sample = getSampleUri(440, false);
+    const sample = getSampleUri(440, false, 1);
     const pool = audioPoolRef.current;
 
     const primeOne = async (a: PoolAudio) => {
@@ -637,7 +653,12 @@ export default function Poly420() {
       }
     };
 
-    await Promise.all(pool.map(primeOne));
+    if (pool.length === 0) return;
+    if (pool[0]) await primeOne(pool[0]);
+    if (pool[1]) await primeOne(pool[1]);
+    pool.slice(2).forEach((audio) => {
+      void primeOne(audio);
+    });
   }, [ensureAudioPool, getSampleUri]);
 
   const playSampleWithHtmlAudio = useCallback(
@@ -671,8 +692,9 @@ export default function Poly420() {
             audio.currentTime = 0;
           } catch {}
 
-          audio.src = getSampleUri(frequency, accent);
-          audio.volume = Math.max(0, Math.min(1, volume));
+          const loudness = Math.max(0, Math.min(1.1, volume * 1.28 + 0.06));
+          audio.src = getSampleUri(frequency, accent, loudness);
+          audio.volume = Math.min(1, loudness * (accent ? 1.05 : 1));
           audio.muted = false;
 
           const playPromise = audio.play();
@@ -718,18 +740,24 @@ export default function Poly420() {
       if (useHtmlAudioEngine) {
         const now = performance.now() / 1000;
 
-        if (restartTransportRef.current || startTimeRef.current === 0) {
-          clearPendingHtmlTimers();
-          const startAt = now + 0.06;
-          startTimeRef.current = startAt;
-          nextCycleRef.current = 0;
-          scheduledUntilRef.current = startAt;
-          restartTransportRef.current = false;
-        }
-
         const cycleDur = cycleDurationRef.current;
         const tracksNow = audibleTracksRef.current;
         const until = now + scheduleAhead;
+
+        if (transportAnchorRef.current === null) {
+          transportAnchorRef.current = now + 0.008;
+        }
+
+        if (restartTransportRef.current || startTimeRef.current === 0) {
+          clearPendingHtmlTimers();
+          const anchor = transportAnchorRef.current;
+          const elapsed = Math.max(0, now - anchor);
+          const nextCycle = Math.max(0, Math.floor(elapsed / cycleDur));
+          startTimeRef.current = anchor;
+          nextCycleRef.current = nextCycle;
+          scheduledUntilRef.current = anchor + nextCycle * cycleDur;
+          restartTransportRef.current = false;
+        }
 
         while (scheduledUntilRef.current < until) {
           const cycleIndex = nextCycleRef.current;
@@ -781,24 +809,34 @@ export default function Poly420() {
         return;
       }
 
-      if (restartTransportRef.current || startTimeRef.current === 0) {
-        // Restart transport cleanly without closing context
-        const startAt = ctx.currentTime + 0.06;
-        startTimeRef.current = startAt;
-        nextCycleRef.current = 0;
-        scheduledUntilRef.current = startAt;
-        restartTransportRef.current = false;
+      const now = performance.now() / 1000;
+      const ctxOffset = ctx.currentTime - now;
+
+      if (transportAnchorRef.current === null) {
+        transportAnchorRef.current = now + 0.008;
       }
 
       const cycleDur = cycleDurationRef.current;
       const tracksNow = audibleTracksRef.current;
 
-      const until = ctx.currentTime + scheduleAhead;
+      if (restartTransportRef.current || startTimeRef.current === 0) {
+        // Restart transport cleanly without closing context
+        const anchor = transportAnchorRef.current;
+        const elapsed = Math.max(0, now - anchor);
+        const nextCycle = Math.max(0, Math.floor(elapsed / cycleDur));
+        startTimeRef.current = anchor;
+        nextCycleRef.current = nextCycle;
+        scheduledUntilRef.current = anchor + nextCycle * cycleDur;
+        restartTransportRef.current = false;
+      }
+
+      const until = now + scheduleAhead;
 
       // Schedule cycles until "until"
       while (scheduledUntilRef.current < until) {
         const cycleIndex = nextCycleRef.current;
-        const cycleStart = startTimeRef.current + cycleIndex * cycleDur;
+        const cycleStartPerf = startTimeRef.current + cycleIndex * cycleDur;
+        const cycleStart = cycleStartPerf + ctxOffset;
 
         // If our cycleStart is already too far in the past (tab pause), realign
         if (cycleStart < ctx.currentTime - 0.2) {
@@ -811,7 +849,8 @@ export default function Poly420() {
           const existingGain = trackGainsRef.current.get(track.id);
           const trackGain = existingGain ?? ctx.createGain();
 
-          trackGain.gain.value = track.volume;
+          const preamped = Math.min(1.1, track.volume * 1.22 + 0.04);
+          trackGain.gain.value = preamped;
           if (!existingGain) {
             trackGain.connect(ctx.destination);
             trackGainsRef.current.set(track.id, trackGain);
@@ -819,10 +858,10 @@ export default function Poly420() {
 
           for (let beat = 0; beat < track.beatsPerCycle; beat += 1) {
             const beatMoment =
-              cycleStart + (cycleDur * beat) / track.beatsPerCycle;
+              cycleStartPerf + (cycleDur * beat) / track.beatsPerCycle;
             scheduleClickWebAudio(
               ctx,
-              beatMoment,
+              beatMoment + ctxOffset,
               frequency,
               beat === 0,
               track.beatsPerCycle,
@@ -832,7 +871,7 @@ export default function Poly420() {
         });
 
         nextCycleRef.current += 1;
-        scheduledUntilRef.current = cycleStart + cycleDur;
+        scheduledUntilRef.current = cycleStartPerf + cycleDur;
       }
     };
 
@@ -874,23 +913,17 @@ export default function Poly420() {
         return;
       }
 
-      const ctx = audioContextRef.current;
-      const now = useHtmlAudioEngine
-        ? performance.now() / 1000
-        : ctx?.currentTime ?? null;
+      const now = performance.now() / 1000;
+      const anchor = transportAnchorRef.current;
 
-      if (
-        now === null ||
-        (!useHtmlAudioEngine && ctx?.state !== "running") ||
-        startTimeRef.current === 0
-      ) {
+      if (anchor === null || startTimeRef.current === 0) {
         setCycleProgressCss(0);
         frame = requestAnimationFrame(update);
         return;
       }
 
       const cycleDur = cycleDurationRef.current;
-      const elapsed = Math.max(0, now - startTimeRef.current);
+      const elapsed = Math.max(0, now - anchor);
       const position = cycleDur > 0 ? (elapsed % cycleDur) / cycleDur : 0;
       setCycleProgressCss(position);
       frame = requestAnimationFrame(update);
@@ -934,11 +967,18 @@ export default function Poly420() {
       const cycleDur = cycleDurationRef.current;
       const tracksNow = audibleTracksRef.current;
 
-      const startAt = now + 0.05;
+      const startAt = transportAnchorRef.current ?? now + 0.008;
+      transportAnchorRef.current = startAt;
       startTimeRef.current = startAt;
-      nextCycleRef.current = 0;
-      scheduledUntilRef.current = startAt;
+      nextCycleRef.current = Math.max(
+        0,
+        Math.floor((now - startAt) / cycleDur)
+      );
+      scheduledUntilRef.current = startAt + nextCycleRef.current * cycleDur;
       restartTransportRef.current = false;
+
+      const firstCycleStart =
+        startAt + nextCycleRef.current * cycleDur + 0.003; /* headroom */
 
       const hitsByBeat = new Map<
         number,
@@ -948,7 +988,8 @@ export default function Poly420() {
       tracksNow.forEach((track) => {
         const frequency = PITCHES[track.pitchIndex % PITCHES.length];
         for (let beat = 0; beat < track.beatsPerCycle; beat += 1) {
-          const beatMoment = startAt + (cycleDur * beat) / track.beatsPerCycle;
+          const beatMoment =
+            firstCycleStart + (cycleDur * beat) / track.beatsPerCycle;
           const key = Math.round(beatMoment * 1000);
           const bucket = hitsByBeat.get(key) ?? [];
           bucket.push({
@@ -967,8 +1008,8 @@ export default function Poly420() {
         });
       });
 
-      nextCycleRef.current = 1;
-      scheduledUntilRef.current = startAt + cycleDur;
+      nextCycleRef.current += 1;
+      scheduledUntilRef.current = firstCycleStart + cycleDur;
 
       setPlaying(true);
       return;
@@ -984,6 +1025,16 @@ export default function Poly420() {
       );
 
       // Start playing only after audio is actually running
+      const now = performance.now() / 1000;
+      const anchor = transportAnchorRef.current ?? now + 0.008;
+      transportAnchorRef.current = anchor;
+      startTimeRef.current = anchor;
+      nextCycleRef.current = Math.max(
+        0,
+        Math.floor((now - anchor) / cycleDurationRef.current)
+      );
+      scheduledUntilRef.current =
+        anchor + nextCycleRef.current * cycleDurationRef.current;
       restartTransportRef.current = true;
       setPlaying(true);
     } catch (e) {
@@ -1221,17 +1272,6 @@ export default function Poly420() {
                 </div>
               );
             })}
-          </div>
-
-          <div
-            style={{
-              opacity: 0.5,
-              fontFamily: "monospace",
-              fontSize: 12,
-              padding: "10px 2px",
-            }}
-          >
-            engine: {useHtmlAudioEngine ? "html-audio" : "webaudio (precision)"}
           </div>
         </div>
       </div>
