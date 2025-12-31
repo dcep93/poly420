@@ -362,6 +362,23 @@ export default function Poly420() {
   // Prefer HTML audio on iOS Chrome/WKWebView where WebAudio is often blocked.
   const useHtmlAudioEngine = isIOSChromeLikeWebView();
 
+  const restartHtmlTransport = useCallback(() => {
+    if (!useHtmlAudioEngine || !playingRef.current) return;
+
+    clearPendingHtmlTimers();
+    const now = performance.now() / 1000;
+    const anchor = transportAnchorRef.current ?? now + 0.008;
+    transportAnchorRef.current = anchor;
+    startTimeRef.current = anchor;
+    nextCycleRef.current = Math.max(
+      0,
+      Math.floor((now - anchor) / cycleDurationRef.current)
+    );
+    scheduledUntilRef.current =
+      startTimeRef.current + nextCycleRef.current * cycleDurationRef.current;
+    restartTransportRef.current = true;
+  }, [clearPendingHtmlTimers, useHtmlAudioEngine]);
+
   const cycleDuration = useMemo(() => 60 / tempo, [tempo]);
 
   const timingSignature = useMemo(
@@ -374,8 +391,16 @@ export default function Poly420() {
 
   const audibleTracks = useMemo(() => {
     const focused = tracks.filter((track) => track.deafened);
-    const base = focused.length > 0 ? focused : tracks;
-    return base.filter((track) => !track.muted);
+    const activeIds = new Set(
+      (focused.length > 0 ? focused : tracks)
+        .filter((track) => !track.muted)
+        .map((track) => track.id)
+    );
+
+    return tracks.map((track) => ({
+      ...track,
+      volume: activeIds.has(track.id) ? track.volume : 0,
+    }));
   }, [tracks]);
 
   // Keep refs current for the scheduler
@@ -391,17 +416,17 @@ export default function Poly420() {
 
   useEffect(() => {
     if (!playingRef.current || !useHtmlAudioEngine) return;
-    clearPendingHtmlTimers();
-    restartTransportRef.current = true;
-  }, [audibleMembershipSignature, clearPendingHtmlTimers, useHtmlAudioEngine]);
+    restartHtmlTransport();
+  }, [audibleMembershipSignature, restartHtmlTransport, useHtmlAudioEngine]);
 
   useEffect(() => {
     if (!playingRef.current || useHtmlAudioEngine) return;
     const ctx = audioContextRef.current;
     if (!ctx || ctx.state === "closed") return;
 
-    const trackById = new Map(tracks.map((track) => [track.id, track]));
-    const audibleIds = new Set(audibleTracks.map((track) => track.id));
+    const trackById = new Map(
+      audibleTracks.map((track) => [track.id, track])
+    );
 
     trackGainsRef.current.forEach((gain, id) => {
       const track = trackById.get(id);
@@ -413,23 +438,20 @@ export default function Poly420() {
         return;
       }
 
-      const targetGain = audibleIds.has(id) ? track.volume : 0;
+      const targetGain = track.volume;
       gain.gain.setValueAtTime(targetGain, ctx.currentTime);
     });
 
-    tracks.forEach((track) => {
+    audibleTracks.forEach((track) => {
       const existing = trackGainsRef.current.get(track.id);
       if (existing) return;
 
       const gain = ctx.createGain();
-      gain.gain.setValueAtTime(
-        audibleIds.has(track.id) ? track.volume : 0,
-        ctx.currentTime
-      );
+      gain.gain.setValueAtTime(track.volume, ctx.currentTime);
       gain.connect(ctx.destination);
       trackGainsRef.current.set(track.id, gain);
     });
-  }, [audibleTracks, tracks, useHtmlAudioEngine]);
+  }, [audibleTracks, useHtmlAudioEngine]);
 
   // Restart transport when timing changes; rebuild the audio loop so old hits die
   useEffect(() => {
@@ -603,8 +625,11 @@ export default function Poly420() {
 
   const getSampleUri = useCallback(
     (freq: number, accent: boolean, loudness: number) => {
-      const boosted = Math.min(1.18, loudness * (accent ? 1.3 : 1.18) + 0.06);
-      const quantized = Math.max(1, Math.round(boosted * 100));
+      const boosted = Math.max(
+        0,
+        Math.min(1.18, loudness * (accent ? 1.3 : 1.18))
+      );
+      const quantized = Math.round(boosted * 100);
       const key = `${freq}:${accent ? "a" : "n"}:${quantized}`;
       const hit = samplesRef.current.get(key);
       if (hit) return hit;
@@ -704,10 +729,7 @@ export default function Poly420() {
             audio.currentTime = 0;
           } catch {}
 
-          const loudness = Math.max(
-            0,
-            Math.min(1.1, track.volume * 1.28 + 0.06)
-          );
+          const loudness = Math.max(0, Math.min(1.1, track.volume * 1.3));
           audio.src = getSampleUri(frequency, accent, loudness);
           audio.volume = Math.min(1, loudness * (accent ? 1.05 : 1));
           audio.muted = false;
@@ -862,7 +884,10 @@ export default function Poly420() {
           const existingGain = trackGainsRef.current.get(track.id);
           const trackGain = existingGain ?? ctx.createGain();
 
-          const preamped = Math.min(1.1, track.volume * 1.22 + 0.04);
+          const preamped = Math.max(
+            0,
+            Math.min(1.1, track.volume * 1.22 + 0.04)
+          );
           trackGain.gain.value = preamped;
           if (!existingGain) {
             trackGain.connect(ctx.destination);
