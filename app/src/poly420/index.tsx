@@ -357,7 +357,10 @@ export default function Poly420() {
   const cycleDuration = useMemo(() => 60 / tempo, [tempo]);
 
   const timingSignature = useMemo(
-    () => `${tempo}|${tracks.map((track) => `${track.id}:${track.beatsPerCycle}`).join(",")}`,
+    () =>
+      `${tempo}|${tracks
+        .map((track) => `${track.id}:${track.beatsPerCycle}`)
+        .join(",")}`,
     [tempo, tracks]
   );
 
@@ -441,7 +444,9 @@ export default function Poly420() {
       (window as unknown as { webkitAudioContext: typeof AudioContext })
         .webkitAudioContext;
 
-    const freshCtx = new AudioCtor({ latencyHint: "interactive" } as AudioContextOptions);
+    const freshCtx = new AudioCtor({
+      latencyHint: "interactive",
+    } as AudioContextOptions);
     audioContextRef.current = freshCtx;
 
     void (async () => {
@@ -461,7 +466,12 @@ export default function Poly420() {
         }
       } catch {}
     })();
-  }, [clearPendingHtmlTimers, resetTrackGains, timingSignature, useHtmlAudioEngine]);
+  }, [
+    clearPendingHtmlTimers,
+    resetTrackGains,
+    timingSignature,
+    useHtmlAudioEngine,
+  ]);
 
   const setCycleProgressCss = useCallback((value: number) => {
     const clamped = Math.max(0, Math.min(1, value));
@@ -652,7 +662,8 @@ export default function Poly420() {
       const playNow = () => {
         hits.forEach(({ frequency, accent, volume }) => {
           const index = audioPoolIndexRef.current % pool.length;
-          audioPoolIndexRef.current = (audioPoolIndexRef.current + 1) % pool.length;
+          audioPoolIndexRef.current =
+            (audioPoolIndexRef.current + 1) % pool.length;
           const audio = pool[index];
 
           audio.pause();
@@ -795,30 +806,30 @@ export default function Poly420() {
           return;
         }
 
-          tracksNow.forEach((track) => {
-            const frequency = PITCHES[track.pitchIndex % PITCHES.length];
-            const existingGain = trackGainsRef.current.get(track.id);
-            const trackGain = existingGain ?? ctx.createGain();
+        tracksNow.forEach((track) => {
+          const frequency = PITCHES[track.pitchIndex % PITCHES.length];
+          const existingGain = trackGainsRef.current.get(track.id);
+          const trackGain = existingGain ?? ctx.createGain();
 
-            trackGain.gain.value = track.volume;
-            if (!existingGain) {
-              trackGain.connect(ctx.destination);
-              trackGainsRef.current.set(track.id, trackGain);
-            }
+          trackGain.gain.value = track.volume;
+          if (!existingGain) {
+            trackGain.connect(ctx.destination);
+            trackGainsRef.current.set(track.id, trackGain);
+          }
 
-            for (let beat = 0; beat < track.beatsPerCycle; beat += 1) {
-              const beatMoment =
-                cycleStart + (cycleDur * beat) / track.beatsPerCycle;
-              scheduleClickWebAudio(
-                ctx,
-                beatMoment,
-                frequency,
-                beat === 0,
-                track.beatsPerCycle,
-                trackGain
-              );
-            }
-          });
+          for (let beat = 0; beat < track.beatsPerCycle; beat += 1) {
+            const beatMoment =
+              cycleStart + (cycleDur * beat) / track.beatsPerCycle;
+            scheduleClickWebAudio(
+              ctx,
+              beatMoment,
+              frequency,
+              beat === 0,
+              track.beatsPerCycle,
+              trackGain
+            );
+          }
+        });
 
         nextCycleRef.current += 1;
         scheduledUntilRef.current = cycleStart + cycleDur;
@@ -845,7 +856,12 @@ export default function Poly420() {
       window.removeEventListener("pageshow", onVisibility);
       // DO NOT close context here. Only Stop/unmount closes.
     };
-  }, [clearPendingHtmlTimers, playSampleWithHtmlAudio, playing, useHtmlAudioEngine]);
+  }, [
+    clearPendingHtmlTimers,
+    playSampleWithHtmlAudio,
+    playing,
+    useHtmlAudioEngine,
+  ]);
 
   // CSS progress loop (read-only; doesn't touch audio engine)
   useEffect(() => {
@@ -906,7 +922,10 @@ export default function Poly420() {
       try {
         await ensureAudioRunningInGesture();
       } catch (error) {
-        console.warn("[poly420] WebAudio warmup failed; continuing with HTML audio", error);
+        console.warn(
+          "[poly420] WebAudio warmup failed; continuing with HTML audio",
+          error
+        );
       }
     }
 
@@ -921,7 +940,10 @@ export default function Poly420() {
       scheduledUntilRef.current = startAt;
       restartTransportRef.current = false;
 
-      const hitsByBeat = new Map<number, { accent: boolean; volume: number; frequency: number }[]>();
+      const hitsByBeat = new Map<
+        number,
+        { accent: boolean; volume: number; frequency: number }[]
+      >();
 
       tracksNow.forEach((track) => {
         const frequency = PITCHES[track.pitchIndex % PITCHES.length];
