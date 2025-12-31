@@ -384,11 +384,16 @@ export default function Poly420() {
     audibleTracksRef.current = audibleTracks;
   }, [cycleDuration, audibleTracks]);
 
+  const audibleMembershipSignature = useMemo(
+    () => audibleTracks.map((track) => track.id).join("|"),
+    [audibleTracks]
+  );
+
   useEffect(() => {
     if (!playingRef.current || !useHtmlAudioEngine) return;
     clearPendingHtmlTimers();
     restartTransportRef.current = true;
-  }, [audibleTracks, clearPendingHtmlTimers, useHtmlAudioEngine]);
+  }, [audibleMembershipSignature, clearPendingHtmlTimers, useHtmlAudioEngine]);
 
   useEffect(() => {
     if (!playingRef.current || useHtmlAudioEngine) return;
@@ -668,9 +673,8 @@ export default function Poly420() {
     }: {
       when: number;
       hits: {
-        frequency: number;
+        trackId: string;
         accent: boolean;
-        volume: number;
       }[];
     }) => {
       ensureAudioPool();
@@ -681,7 +685,15 @@ export default function Poly420() {
       const delayMs = Math.max(0, Math.round((when - now) * 1000));
 
       const playNow = () => {
-        hits.forEach(({ frequency, accent, volume }) => {
+        const audibleById = new Map(
+          audibleTracksRef.current.map((track) => [track.id, track])
+        );
+
+        hits.forEach(({ trackId, accent }) => {
+          const track = audibleById.get(trackId);
+          if (!track) return;
+
+          const frequency = PITCHES[track.pitchIndex % PITCHES.length];
           const index = audioPoolIndexRef.current % pool.length;
           audioPoolIndexRef.current =
             (audioPoolIndexRef.current + 1) % pool.length;
@@ -692,7 +704,10 @@ export default function Poly420() {
             audio.currentTime = 0;
           } catch {}
 
-          const loudness = Math.max(0, Math.min(1.1, volume * 1.28 + 0.06));
+          const loudness = Math.max(
+            0,
+            Math.min(1.1, track.volume * 1.28 + 0.06)
+          );
           audio.src = getSampleUri(frequency, accent, loudness);
           audio.volume = Math.min(1, loudness * (accent ? 1.05 : 1));
           audio.muted = false;
@@ -771,11 +786,10 @@ export default function Poly420() {
 
           const hitsByBeat = new Map<
             number,
-            { accent: boolean; volume: number; frequency: number }[]
+            { accent: boolean; trackId: string }[]
           >();
 
           tracksNow.forEach((track) => {
-            const frequency = PITCHES[track.pitchIndex % PITCHES.length];
             for (let beat = 0; beat < track.beatsPerCycle; beat += 1) {
               const beatMoment =
                 cycleStart + (cycleDur * beat) / track.beatsPerCycle;
@@ -783,8 +797,7 @@ export default function Poly420() {
               const bucket = hitsByBeat.get(key) ?? [];
               bucket.push({
                 accent: beat === 0,
-                volume: track.volume,
-                frequency,
+                trackId: track.id,
               });
               hitsByBeat.set(key, bucket);
             }
@@ -982,11 +995,10 @@ export default function Poly420() {
 
       const hitsByBeat = new Map<
         number,
-        { accent: boolean; volume: number; frequency: number }[]
+        { accent: boolean; trackId: string }[]
       >();
 
       tracksNow.forEach((track) => {
-        const frequency = PITCHES[track.pitchIndex % PITCHES.length];
         for (let beat = 0; beat < track.beatsPerCycle; beat += 1) {
           const beatMoment =
             firstCycleStart + (cycleDur * beat) / track.beatsPerCycle;
@@ -994,8 +1006,7 @@ export default function Poly420() {
           const bucket = hitsByBeat.get(key) ?? [];
           bucket.push({
             accent: beat === 0,
-            volume: track.volume,
-            frequency,
+            trackId: track.id,
           });
           hitsByBeat.set(key, bucket);
         }
